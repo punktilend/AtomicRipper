@@ -1,5 +1,6 @@
 add_executable(atomicripper-tests
     test_toc.cpp
+    test_accuraterip.cpp
 )
 
 target_link_libraries(atomicripper-tests PRIVATE
