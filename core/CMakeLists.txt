@@ -3,6 +3,7 @@ add_library(atomicripper-core STATIC
     drive/Drive.cpp
     drive/DriveEnumerator.cpp
     metadata/DiscId.cpp
+    rip/RipEngine.cpp
 )
 
 target_include_directories(atomicripper-core PUBLIC
