@@ -25,17 +25,23 @@ std::vector<Drive> DriveEnumerator::enumerate() {
         if (GetDriveTypeA(root.c_str()) != DRIVE_CDROM)
             continue;
 
-        // Query the volume label / description for the drive
-        char volumeName[256]  = {};
-        char fsName[64]       = {};
-        GetVolumeInformationA(root.c_str(), volumeName, sizeof(volumeName),
-                              nullptr, nullptr, nullptr, fsName, sizeof(fsName));
-
-        // Build a friendly description: e.g. "D: [MY_CD]" or just "D:"
+        // Build path/description strings up front
         std::string path = { letter, ':' };
         std::string desc = path;
-        if (volumeName[0] != '\0')
-            desc += " [" + std::string(volumeName) + "]";
+
+        // Only query volume label if the drive is ready — GetVolumeInformationA
+        // can block indefinitely on drives stuck in a firmware error state.
+        Drive probe(path, desc);
+        if (probe.status() == DriveStatus::Ready) {
+            char volumeName[256] = {};
+            char fsName[64]      = {};
+            // GetVolumeInformationA is synchronous but safe here because we
+            // already confirmed the drive is ready via the timed IOCTL above.
+            GetVolumeInformationA(root.c_str(), volumeName, sizeof(volumeName),
+                                  nullptr, nullptr, nullptr, fsName, sizeof(fsName));
+            if (volumeName[0] != '\0')
+                desc += " [" + std::string(volumeName) + "]";
+        }
 
         drives.emplace_back(path, desc);
     }

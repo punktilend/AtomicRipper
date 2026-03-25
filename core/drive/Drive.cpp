@@ -21,7 +21,7 @@ Drive::Drive(std::string path, std::string description)
 
 namespace {
 
-// Open the drive for IOCTL access.
+// Open the drive for IOCTL access (overlapped so we can impose timeouts).
 // path is expected to be "X:" (no trailing backslash).
 HANDLE openDrive(const std::string& path) {
     std::wstring devicePath = L"\\\\.\\" +
@@ -32,9 +32,51 @@ HANDLE openDrive(const std::string& path) {
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr,
         OPEN_EXISTING,
-        0,
+        FILE_FLAG_OVERLAPPED,   // enables timeout-able IOCTLs
         nullptr
     );
+}
+
+// DeviceIoControl wrapper with a hard timeout.
+// Returns false on error OR timeout (GetLastError() == WAIT_TIMEOUT on timeout).
+bool ioctlWithTimeout(HANDLE     hDrive,
+                      DWORD      code,
+                      void*      inBuf,   DWORD inSize,
+                      void*      outBuf,  DWORD outSize,
+                      DWORD*     bytesOut,
+                      DWORD      timeoutMs = 5000) {
+    OVERLAPPED ov{};
+    ov.hEvent = CreateEventW(nullptr, /*manualReset=*/TRUE,
+                             /*initialState=*/FALSE, nullptr);
+    if (!ov.hEvent) return false;
+
+    DWORD returned = 0;
+    BOOL  ok       = DeviceIoControl(hDrive, code,
+                                     inBuf, inSize,
+                                     outBuf, outSize,
+                                     &returned, &ov);
+
+    if (!ok) {
+        if (GetLastError() != ERROR_IO_PENDING) {
+            CloseHandle(ov.hEvent);
+            return false;
+        }
+        // Wait for completion with timeout
+        DWORD wait = WaitForSingleObject(ov.hEvent, timeoutMs);
+        if (wait == WAIT_TIMEOUT) {
+            CancelIo(hDrive);
+            // Drain the cancelled I/O so the handle stays consistent
+            GetOverlappedResult(hDrive, &ov, &returned, /*wait=*/TRUE);
+            CloseHandle(ov.hEvent);
+            SetLastError(WAIT_TIMEOUT);
+            return false;
+        }
+        ok = GetOverlappedResult(hDrive, &ov, &returned, /*wait=*/FALSE);
+    }
+
+    CloseHandle(ov.hEvent);
+    if (bytesOut) *bytesOut = returned;
+    return ok != 0;
 }
 
 // Convert MSF (minute/second/frame) to LBA.
@@ -54,12 +96,15 @@ DriveStatus Drive::status() const {
     // RAII close
     struct Guard { HANDLE h; ~Guard() { CloseHandle(h); } } g{hDrive};
 
-    // IOCTL_STORAGE_CHECK_VERIFY returns ERROR_NOT_READY if no disc is present
+    // IOCTL_STORAGE_CHECK_VERIFY returns ERROR_NOT_READY if no disc is present.
+    // 5-second timeout guards against drives stuck in a firmware error state.
     DWORD bytes = 0;
-    if (!DeviceIoControl(hDrive, IOCTL_STORAGE_CHECK_VERIFY,
-                         nullptr, 0, nullptr, 0, &bytes, nullptr))
+    if (!ioctlWithTimeout(hDrive, IOCTL_STORAGE_CHECK_VERIFY,
+                          nullptr, 0, nullptr, 0, &bytes))
     {
         DWORD err = GetLastError();
+        if (err == WAIT_TIMEOUT)
+            return DriveStatus::Error;
         if (err == ERROR_NOT_READY || err == ERROR_NO_MEDIA_IN_DRIVE)
             return DriveStatus::Empty;
         return DriveStatus::NotReady;
@@ -76,10 +121,10 @@ std::optional<TOC> Drive::readTOC() const {
 
     CDROM_TOC cdTOC{};
     DWORD bytesReturned = 0;
-    if (!DeviceIoControl(hDrive, IOCTL_CDROM_READ_TOC,
-                         nullptr, 0,
-                         &cdTOC, sizeof(cdTOC),
-                         &bytesReturned, nullptr))
+    if (!ioctlWithTimeout(hDrive, IOCTL_CDROM_READ_TOC,
+                          nullptr, 0,
+                          &cdTOC, sizeof(cdTOC),
+                          &bytesReturned, 10000))   // 10-second timeout
         return std::nullopt;
 
     TOC toc;
@@ -124,8 +169,8 @@ bool Drive::eject() const {
     struct Guard { HANDLE h; ~Guard() { CloseHandle(h); } } g{hDrive};
 
     DWORD bytes = 0;
-    return DeviceIoControl(hDrive, IOCTL_STORAGE_EJECT_MEDIA,
-                           nullptr, 0, nullptr, 0, &bytes, nullptr) != 0;
+    return ioctlWithTimeout(hDrive, IOCTL_STORAGE_EJECT_MEDIA,
+                            nullptr, 0, nullptr, 0, &bytes, 8000);
 }
 
 // ---------------------------------------------------------------------------
