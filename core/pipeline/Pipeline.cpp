@@ -4,12 +4,12 @@
 
 #include "../drive/Drive.hpp"
 #include "../encode/FlacEncoder.hpp"
+#include "../encode/WavEncoder.hpp"
 #include "../metadata/CoverArt.hpp"
 #include "../metadata/DiscId.hpp"
 #include "../metadata/TagWriter.hpp"
 
 #include <cassert>
-#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -21,7 +21,6 @@ namespace atomicripper::pipeline {
 // ---------------------------------------------------------------------------
 namespace {
 
-// Replace filesystem-illegal characters with '_'
 std::string sanitise(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -44,23 +43,6 @@ std::string makeTrackName(int number, const std::string& title, const char* ext)
     if (title.empty())
         return std::string(num) + "." + ext;
     return std::string(num) + " - " + sanitise(title) + "." + ext;
-}
-
-// Write a minimal WAV file inline (no WAV encoder class yet)
-void writeWavLE16(FILE* fp, uint16_t v) {
-    uint8_t b[2] = { uint8_t(v & 0xFF), uint8_t(v >> 8) };
-    fwrite(b, 1, 2, fp);
-}
-void writeWavLE32(FILE* fp, uint32_t v) {
-    uint8_t b[4] = { uint8_t(v & 0xFF), uint8_t((v>>8)&0xFF),
-                     uint8_t((v>>16)&0xFF), uint8_t((v>>24)&0xFF) };
-    fwrite(b, 1, 4, fp);
-}
-void writeWavHeader(FILE* fp, uint32_t dataBytes) {
-    fwrite("RIFF",1,4,fp); writeWavLE32(fp, dataBytes+36);
-    fwrite("WAVE",1,4,fp); fwrite("fmt ",1,4,fp); writeWavLE32(fp,16);
-    writeWavLE16(fp,1); writeWavLE16(fp,2); writeWavLE32(fp,44100); writeWavLE32(fp,176400);
-    writeWavLE16(fp,4); writeWavLE16(fp,16); fwrite("data",1,4,fp); writeWavLE32(fp,dataBytes);
 }
 
 } // anonymous namespace
@@ -313,18 +295,23 @@ void Pipeline::workerThread(std::string drivePath) {
                     m_cb.onError("Encode failed for track " + std::to_string(track.number) + ": " + encErr);
             } else {
                 // WAV
-                FILE* fp = fopen(filePath.string().c_str(), "wb");
-                if (fp) {
-                    const uint32_t dataBytes = static_cast<uint32_t>(result.data.size());
-                    writeWavHeader(fp, dataBytes);
-                    fwrite(result.data.data(), 1, result.data.size(), fp);
-                    fseek(fp, 0, SEEK_SET);
-                    writeWavHeader(fp, dataBytes);
-                    fclose(fp);
-                    writeOk = true;
-                } else if (m_cb.onError) {
-                    m_cb.onError("Cannot create WAV file: " + filePath.string());
+                encode::EncoderSettings es = m_config.encoderSettings;
+                es.format       = encode::Format::WAV;
+                es.totalSamples = static_cast<uint64_t>(result.data.size()) / 4u;
+
+                encode::WavEncoder wavEnc;
+                std::string wavErr;
+                if (wavEnc.open(filePath, es)) {
+                    std::vector<int32_t> samples;
+                    encode::cdBytesToSamples(result.data.data(), result.data.size(), samples);
+                    writeOk = wavEnc.writeSamples(samples) && wavEnc.finalize();
+                    if (!writeOk) wavErr = wavEnc.lastError();
+                } else {
+                    wavErr = wavEnc.lastError();
                 }
+                if (!writeOk && m_cb.onError)
+                    m_cb.onError("WAV encode failed for track " +
+                                 std::to_string(track.number) + ": " + wavErr);
             }
         }
 
@@ -381,21 +368,23 @@ void Pipeline::workerThread(std::string drivePath) {
     // ------------------------------------------------------------------
     if (m_config.writeTags && isFlac && release) {
         setState(PipelineState::Tagging);
-        int tagged = 0;
+        int tagged   = 0;
+        int audioIdx2 = 0;  // counts audio tracks only — matches writtenFiles index
 
         for (int i = 0; i < static_cast<int>(toc.tracks.size()); ++i) {
             const auto& track = toc.tracks[static_cast<size_t>(i)];
             if (!track.isAudio) continue;
 
-            int ai = track.number - 1;  // audio track index (assumes no data tracks before audio)
-            if (ai < 0 || ai >= static_cast<int>(writtenFiles.size())) continue;
+            const int ai = audioIdx2++;
+            if (ai >= static_cast<int>(writtenFiles.size())) continue;
 
             const auto& filePath = writtenFiles[static_cast<size_t>(ai)];
             if (filePath.empty()) continue;
 
-            int mbIdx = track.number - 1;
-            if (mbIdx < 0 || mbIdx >= static_cast<int>(release->tracks.size()))
-                mbIdx = ai;
+            // MB track list is 0-based audio tracks; use ai as the index
+            int mbIdx = ai;
+            if (mbIdx >= static_cast<int>(release->tracks.size()))
+                mbIdx = static_cast<int>(release->tracks.size()) - 1;
 
             auto tags = metadata::TrackTags::from(*release, mbIdx);
 
@@ -412,7 +401,7 @@ void Pipeline::workerThread(std::string drivePath) {
             if (newPath != filePath) {
                 std::error_code renameEc;
                 std::filesystem::rename(filePath, newPath, renameEc);
-                // Update in-place so future iterations see the right path
+                // Update in-place (ai is the audio-track index matching writtenFiles)
                 writtenFiles[static_cast<size_t>(ai)] = renameEc ? filePath : newPath;
             }
 
@@ -423,7 +412,15 @@ void Pipeline::workerThread(std::string drivePath) {
     }
 
     // ------------------------------------------------------------------
-    // 8.  Done
+    // 8.  Eject (optional)
+    // ------------------------------------------------------------------
+    if (m_config.ejectWhenDone) {
+        drive::Drive drv(drivePath, drivePath);
+        drv.eject();   // best-effort; ignore failure
+    }
+
+    // ------------------------------------------------------------------
+    // 9.  Done
     // ------------------------------------------------------------------
     setState(PipelineState::Complete);
     if (m_cb.onComplete) m_cb.onComplete();

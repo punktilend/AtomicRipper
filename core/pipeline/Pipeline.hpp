@@ -77,6 +77,7 @@ struct PipelineConfig {
     bool autoDetectOffset  = false;  // sweep ±1176 samples if no tracks match at offset=0
     bool writeTags         = true;   // write tags via TagLib (FLAC only)
     bool autoSelectRelease = false;  // pick the first release automatically
+    bool ejectWhenDone     = false;  // eject disc tray after rip completes
 };
 
 // ---------------------------------------------------------------------------

@@ -55,7 +55,8 @@ static int doRip(const std::string& drivePath,
                  const std::string& outputDir,
                  encode::Format     format,
                  int                driveOffset,
-                 bool               detectOffset = false) {
+                 bool               detectOffset = false,
+                 bool               eject        = false) {
     std::filesystem::path outPath = outputDir.empty()
         ? std::filesystem::current_path()
         : std::filesystem::path(outputDir);
@@ -75,6 +76,7 @@ static int doRip(const std::string& drivePath,
     cfg.verifyAccurateRip                = true;
     cfg.autoDetectOffset                 = detectOffset;
     cfg.writeTags                        = (format == encode::Format::FLAC);
+    cfg.ejectWhenDone                    = eject;
     cfg.autoSelectRelease                = false;
 
     // State shared across callbacks
@@ -228,6 +230,7 @@ static void printUsage(const char* prog) {
     printf("  --rip <drive> [outdir] --wav        Rip to WAV instead\n");
     printf("  --rip <drive> [outdir] --offset N   Set drive read offset in samples\n");
     printf("  --rip <drive> [outdir] --detect-offset  Auto-detect offset via AccurateRip\n");
+    printf("  --rip <drive> [outdir] --eject          Eject disc when rip completes\n");
     printf("  --help                              Show this help\n");
     printf("\nExamples:\n");
     printf("  %s --toc D:\n", prog);
@@ -267,6 +270,7 @@ int main(int argc, char* argv[]) {
         encode::Format fmt          = encode::Format::FLAC;
         int            offset       = 0;
         bool           detectOff    = false;
+        bool           ejectAfter   = false;
 
         for (int i = 3; i < argc; ++i) {
             if      (strcmp(argv[i], "--wav") == 0)
@@ -275,10 +279,12 @@ int main(int argc, char* argv[]) {
                 offset = std::atoi(argv[++i]);
             else if (strcmp(argv[i], "--detect-offset") == 0)
                 detectOff = true;
+            else if (strcmp(argv[i], "--eject") == 0)
+                ejectAfter = true;
             else if (outDir.empty())
                 outDir = argv[i];
         }
-        return doRip(path, outDir, fmt, offset, detectOff);
+        return doRip(path, outDir, fmt, offset, detectOff, ejectAfter);
     }
 
     printUsage(argv[0]); return 1;

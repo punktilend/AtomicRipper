@@ -13,6 +13,7 @@ add_library(atomicripper-core STATIC
     metadata/CoverArt.cpp
     rip/RipEngine.cpp
     encode/FlacEncoder.cpp
+    encode/WavEncoder.cpp
     verify/AccurateRip.cpp
     pipeline/Pipeline.cpp
 )
