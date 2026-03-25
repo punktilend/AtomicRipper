@@ -1,7 +1,9 @@
 #pragma once
 #include "IEncoder.hpp"
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace atomicripper::encode {
 
@@ -26,6 +28,10 @@ public:
     // we store them uppercase for consistency.
     void setTag(const std::string& key, const std::string& value);
     void clearTags();
+
+    // Embed a cover image as a FLAC PICTURE block (front cover).
+    // Must be called before open(). mimeType: "image/jpeg" or "image/png".
+    void setPicture(const std::vector<uint8_t>& data, const std::string& mimeType);
 
     // IEncoder interface
     bool        open(const std::filesystem::path& outputPath,

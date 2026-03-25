@@ -10,9 +10,11 @@ add_library(atomicripper-core STATIC
     metadata/DiscId.cpp
     metadata/MusicBrainz.cpp
     metadata/TagWriter.cpp
+    metadata/CoverArt.cpp
     rip/RipEngine.cpp
     encode/FlacEncoder.cpp
     verify/AccurateRip.cpp
+    pipeline/Pipeline.cpp
 )
 
 target_include_directories(atomicripper-core PUBLIC

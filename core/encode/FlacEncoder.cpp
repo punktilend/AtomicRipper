@@ -23,6 +23,10 @@ struct FlacEncoder::Impl {
     bool                               opened      = false;
     bool                               finalized   = false;
 
+    // Cover art — set via setPicture() before open()
+    std::vector<uint8_t> pictureData;
+    std::string          pictureMime;
+
     ~Impl() {
         // Finish encoding if open but not yet finalized
         if (encoder) {
@@ -57,6 +61,12 @@ void FlacEncoder::setTag(const std::string& key, const std::string& value) {
 
 void FlacEncoder::clearTags() {
     m_impl->tags.clear();
+}
+
+void FlacEncoder::setPicture(const std::vector<uint8_t>& data,
+                              const std::string& mimeType) {
+    m_impl->pictureData = data;
+    m_impl->pictureMime = mimeType;
 }
 
 std::string FlacEncoder::lastError() const {
@@ -107,7 +117,37 @@ bool FlacEncoder::open(const std::filesystem::path& outputPath,
         m_impl->metaObjects.push_back(vc);
     }
 
-    // 2. Seek table — one seek point every 10 seconds
+    // 2. PICTURE block — front cover art (optional)
+    if (!m_impl->pictureData.empty()) {
+        auto* pic = FLAC__metadata_object_new(FLAC__METADATA_TYPE_PICTURE);
+        if (pic) {
+            pic->data.picture.type = FLAC__STREAM_METADATA_PICTURE_TYPE_FRONT_COVER;
+
+            // MIME type (copy=true so libFLAC owns the memory)
+            std::string mime = m_impl->pictureMime.empty()
+                ? "image/jpeg" : m_impl->pictureMime;
+            FLAC__metadata_object_picture_set_mime_type(
+                pic, const_cast<char*>(mime.c_str()), /*copy=*/true);
+
+            // Image data (copy=true)
+            FLAC__metadata_object_picture_set_data(
+                pic,
+                const_cast<FLAC__byte*>(
+                    reinterpret_cast<const FLAC__byte*>(m_impl->pictureData.data())),
+                static_cast<FLAC__uint32>(m_impl->pictureData.size()),
+                /*copy=*/true);
+
+            // Width/height/colour depth/indexed colours — 0 = unknown (valid)
+            pic->data.picture.width       = 0;
+            pic->data.picture.height      = 0;
+            pic->data.picture.depth       = 0;
+            pic->data.picture.colors      = 0;
+
+            m_impl->metaObjects.push_back(pic);
+        }
+    }
+
+    // 3. Seek table — one seek point every 10 seconds
     //    Gives players fast random access without being too large.
     auto* seekTable = FLAC__metadata_object_new(FLAC__METADATA_TYPE_SEEKTABLE);
     if (seekTable) {

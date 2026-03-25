@@ -30,6 +30,17 @@ struct ArDiscResult {
 };
 
 // ---------------------------------------------------------------------------
+// Drive read-offset detection result
+// ---------------------------------------------------------------------------
+struct ArOffsetResult {
+    int    sampleOffset  = 0;     // best-match offset in samples (+/-)
+    int    confidence    = 0;     // sum of AccurateRip confidences across matched tracks
+    int    tracksMatched = 0;     // number of tracks that matched at this offset
+    bool   found         = false; // true if at least one track matched
+    std::string error;
+};
+
+// ---------------------------------------------------------------------------
 // AccurateRip — checksum calculation, disc ID derivation, HTTP verification
 //
 // Disc ID math:
@@ -77,6 +88,15 @@ public:
     static ArDiscResult verify(
         const drive::TOC&                        toc,
         const std::vector<std::vector<uint8_t>>& trackPcm);
+
+    // Detect the drive's read offset in samples by sweeping [-maxOffset, +maxOffset]
+    // using an incremental O(N + K) sliding-window algorithm on CRC V1.
+    // Requires the disc to be present in the AccurateRip database.
+    // maxOffset = 1176 covers all known drives (max is ~±1264 samples).
+    static ArOffsetResult detectOffset(
+        const drive::TOC&                        toc,
+        const std::vector<std::vector<uint8_t>>& allTrackPcm,
+        int                                      maxOffset = 1176);
 };
 
 } // namespace atomicripper::verify

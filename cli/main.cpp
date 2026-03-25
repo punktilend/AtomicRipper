@@ -1,41 +1,15 @@
+#include <core/drive/Drive.hpp>
 #include <core/drive/DriveEnumerator.hpp>
 #include <core/drive/TOC.hpp>
-#include <core/encode/FlacEncoder.hpp>
-#include <core/encode/IEncoder.hpp>
 #include <core/metadata/DiscId.hpp>
-#include <core/metadata/MusicBrainz.hpp>
-#include <core/metadata/TagWriter.hpp>
-#include <core/rip/RipEngine.hpp>
-#include <core/verify/AccurateRip.hpp>
+#include <core/pipeline/Pipeline.hpp>
 
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <string>
-#include <vector>
 
 using namespace atomicripper;
-
-// ---------------------------------------------------------------------------
-// WAV fallback writer
-// ---------------------------------------------------------------------------
-namespace {
-void writeLE16(FILE* fp, uint16_t v) {
-    uint8_t b[2] = { uint8_t(v & 0xFF), uint8_t(v >> 8) };
-    fwrite(b, 1, 2, fp);
-}
-void writeLE32(FILE* fp, uint32_t v) {
-    uint8_t b[4] = { uint8_t(v & 0xFF), uint8_t((v>>8)&0xFF),
-                     uint8_t((v>>16)&0xFF), uint8_t((v>>24)&0xFF) };
-    fwrite(b, 1, 4, fp);
-}
-void writeWavHeader(FILE* fp, uint32_t dataBytes) {
-    fwrite("RIFF",1,4,fp); writeLE32(fp, dataBytes+36);
-    fwrite("WAVE",1,4,fp); fwrite("fmt ",1,4,fp); writeLE32(fp,16);
-    writeLE16(fp,1); writeLE16(fp,2); writeLE32(fp,44100); writeLE32(fp,176400);
-    writeLE16(fp,4); writeLE16(fp,16); fwrite("data",1,4,fp); writeLE32(fp,dataBytes);
-}
-} // namespace
 
 // ---------------------------------------------------------------------------
 // TOC display
@@ -75,323 +49,170 @@ static void listDrives() {
 }
 
 // ---------------------------------------------------------------------------
-// Sanitise a string for use in a filename (replace illegal chars with '_')
-// ---------------------------------------------------------------------------
-static std::string sanitise(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (unsigned char c : s) {
-        if (c < 32 || c == '/' || c == '\\' || c == ':' || c == '*' ||
-            c == '?' || c == '"' || c == '<'  || c == '>' || c == '|')
-            out += '_';
-        else
-            out += static_cast<char>(c);
-    }
-    // Trim trailing dots/spaces (Windows forbidden)
-    while (!out.empty() && (out.back() == '.' || out.back() == ' '))
-        out.pop_back();
-    return out.empty() ? "_" : out;
-}
-
-// ---------------------------------------------------------------------------
-// Rip command
+// Rip command — drives the Pipeline with console callbacks
 // ---------------------------------------------------------------------------
 static int doRip(const std::string& drivePath,
                  const std::string& outputDir,
                  encode::Format     format,
-                 int                driveOffset) {
-    // Resolve output directory
+                 int                driveOffset,
+                 bool               detectOffset = false) {
     std::filesystem::path outPath = outputDir.empty()
         ? std::filesystem::current_path()
         : std::filesystem::path(outputDir);
-    std::error_code ec;
-    std::filesystem::create_directories(outPath, ec);
-    if (ec) {
-        printf("Error: cannot create output directory '%s': %s\n",
-               outPath.string().c_str(), ec.message().c_str());
-        return 1;
-    }
 
-    // Read TOC
-    drive::Drive drv(drivePath, drivePath);
-    if (!drv.isReady()) {
-        printf("Drive %s is not ready.\n", drivePath.c_str()); return 1;
-    }
-    auto toc = drv.readTOC();
-    if (!toc || !toc->isValid()) {
-        printf("Failed to read TOC from %s.\n", drivePath.c_str()); return 1;
-    }
+    // Build config
+    pipeline::PipelineConfig cfg;
+    cfg.outputDir                        = outPath;
+    cfg.format                           = format;
+    cfg.ripSettings.mode                 = rip::RipMode::Secure;
+    cfg.ripSettings.maxRetries           = 16;
+    cfg.ripSettings.minMatches           = 2;
+    cfg.ripSettings.useC2Errors          = true;
+    cfg.ripSettings.driveOffset          = driveOffset;
+    cfg.encoderSettings.compressionLevel = 8;
+    cfg.fetchMetadata                    = true;
+    cfg.embedCoverArt                    = (format == encode::Format::FLAC);
+    cfg.verifyAccurateRip                = true;
+    cfg.autoDetectOffset                 = detectOffset;
+    cfg.writeTags                        = (format == encode::Format::FLAC);
+    cfg.autoSelectRelease                = false;
 
-    const char* fmtName = (format == encode::Format::WAV) ? "WAV" : "FLAC";
-    printf("Drive  : %s\n", drivePath.c_str());
-    printf("Disc   : %d tracks, %.0f sec\n", toc->audioTrackCount(), toc->durationSeconds());
-    printf("Format : %s\n", fmtName);
-    if (driveOffset != 0)
-        printf("Offset : %+d samples\n", driveOffset);
-    printf("Output : %s\n\n", outPath.string().c_str());
+    // State shared across callbacks
+    int  exitCode        = 0;
+    int  totalAudioTracks = 0;
 
-    // Open rip engine
-    rip::RipSettings ripSettings;
-    ripSettings.mode        = rip::RipMode::Secure;
-    ripSettings.maxRetries  = 16;
-    ripSettings.minMatches  = 2;
-    ripSettings.useC2Errors = true;
-    ripSettings.driveOffset = driveOffset;
+    // pipePtr is set after Pipeline is constructed; callbacks are only called
+    // from the worker thread, which starts after pipePtr is assigned.
+    pipeline::Pipeline* pipePtr = nullptr;
 
-    rip::RipEngine engine(drivePath, ripSettings);
-    if (!engine.open()) {
-        printf("Error: could not open drive %s for SCSI access.\n", drivePath.c_str());
-        printf("  (Try running as Administrator)\n");
-        return 1;
-    }
-    engine.probeCapabilities();
-    printf("C2 support: %s\n\n", engine.supportsC2() ? "yes" : "no");
+    pipeline::PipelineCallbacks cb;
 
-    const int totalAudioTracks = toc->audioTrackCount();
-    int       tracksWritten    = 0;
-    int       totalErrors      = 0;
+    cb.onTocRead = [&](const drive::TOC& toc) {
+        totalAudioTracks = toc.audioTrackCount();
+        const char* fmtName = (format == encode::Format::WAV) ? "WAV" : "FLAC";
+        printf("Drive  : %s\n", drivePath.c_str());
+        printf("Disc   : %d tracks, %.0f sec\n", totalAudioTracks, toc.durationSeconds());
+        printf("Format : %s\n", fmtName);
+        if (driveOffset != 0) printf("Offset : %+d samples\n", driveOffset);
+        printf("Output : %s\n\n", outPath.string().c_str());
+    };
 
-    std::vector<std::vector<uint8_t>> allTrackPcm;
-    std::vector<std::filesystem::path> writtenFiles;   // for tagging later
-    allTrackPcm.reserve(static_cast<size_t>(totalAudioTracks));
-    writtenFiles.reserve(static_cast<size_t>(totalAudioTracks));
-
-    // -----------------------------------------------------------------------
-    // Rip loop
-    // -----------------------------------------------------------------------
-    for (const auto& track : toc->tracks) {
-        if (!track.isAudio) {
-            printf("Track %02d: DATA — skipping\n\n", track.number);
-            continue;
-        }
-
+    cb.onTrackStart = [](int trackNumber, int total, uint32_t sectors) {
         printf("Ripping track %02d/%d  (%u sectors, %.1f sec)\n",
-               track.number, totalAudioTracks,
-               track.sectorCount, static_cast<double>(track.sectorCount)/75.0);
+               trackNumber, total, sectors, static_cast<double>(sectors)/75.0);
+        fflush(stdout);
+    };
 
-        auto onProgress = [](const rip::RipProgress& p) {
-            const int   W    = 28;
-            const float frac = p.totalSectors
-                ? static_cast<float>(p.currentSector)/p.totalSectors : 0.0f;
-            const int   fill = static_cast<int>(frac * W);
-            printf("\r  [");
-            for (int i = 0; i < W; ++i)
-                putchar(i < fill ? '=' : (i == fill ? '>' : ' '));
-            printf("] %3.0f%%  %4.1fx  %d retries   ", frac*100.0f, p.speedX, p.totalRetries);
-            fflush(stdout);
-        };
+    cb.onTrackProgress = [](const rip::RipProgress& p) {
+        const int   W    = 28;
+        const float frac = p.totalSectors
+            ? static_cast<float>(p.currentSector)/p.totalSectors : 0.0f;
+        const int   fill = static_cast<int>(frac * W);
+        printf("\r  [");
+        for (int i = 0; i < W; ++i)
+            putchar(i < fill ? '=' : (i == fill ? '>' : ' '));
+        printf("] %3.0f%%  %4.1fx  %d retries   ", frac*100.0f, p.speedX, p.totalRetries);
+        fflush(stdout);
+    };
 
-        auto result = engine.ripTrack(track, track.number, onProgress);
+    cb.onTrackDone = [&](const pipeline::TrackDoneInfo& info) {
         printf("\n");
-
-        if (result.cancelled) { printf("  Cancelled.\n"); return 1; }
-        if (!result.ok) {
-            printf("  ERROR: rip failed for track %02d\n\n", track.number);
-            ++totalErrors;
-            allTrackPcm.push_back({});
-            writtenFiles.push_back({});
-            continue;
-        }
-
-        int suspectSectors = 0, c2Sectors = 0;
-        for (const auto& sr : result.sectors) {
-            if (sr.confidence == 0) ++suspectSectors;
-            if (sr.hasC2Errors)     ++c2Sectors;
+        if (!info.ok) {
+            printf("  ERROR: rip failed for track %02d\n\n", info.trackNumber);
+            exitCode = 1;
+            return;
         }
         printf("  CRC32: %08X  |  rip: %s  |  C2: %d sector(s)\n",
-               result.crc32,
-               suspectSectors == 0 ? "OK" : "SUSPECT",
-               c2Sectors);
-        if (suspectSectors > 0)
-            printf("  WARNING: %d sector(s) could not reach read consensus\n", suspectSectors);
+               info.crc32,
+               info.suspectSectors == 0 ? "OK" : "SUSPECT",
+               info.c2Sectors);
+        if (info.suspectSectors > 0)
+            printf("  WARNING: %d sector(s) could not reach read consensus\n", info.suspectSectors);
+        printf("  -> %s\n\n", info.outputPath.string().c_str());
+    };
 
-        // Write file
-        char filename[64];
-        bool writeOk = false;
-        std::filesystem::path filePath;
-
-        if (format == encode::Format::FLAC) {
-            snprintf(filename, sizeof(filename), "track%02d.flac", track.number);
-            filePath = outPath / filename;
-
-            encode::EncoderSettings encSettings;
-            encSettings.format           = encode::Format::FLAC;
-            encSettings.compressionLevel = 8;
-            encSettings.totalSamples     = static_cast<uint64_t>(result.data.size()) / 4u;
-
-            encode::FlacEncoder encoder;
-            encoder.setTag("TRACKNUMBER", std::to_string(track.number));
-            encoder.setTag("TRACKTOTAL",  std::to_string(totalAudioTracks));
-
-            if (!encoder.open(filePath, encSettings)) {
-                printf("  ERROR: %s\n", encoder.lastError().c_str());
-                ++totalErrors; allTrackPcm.push_back({}); writtenFiles.push_back({}); continue;
-            }
-            std::vector<int32_t> samples;
-            encode::cdBytesToSamples(result.data.data(), result.data.size(), samples);
-            if (!encoder.writeSamples(samples) || !encoder.finalize()) {
-                printf("  ERROR: encode failed: %s\n", encoder.lastError().c_str());
-                ++totalErrors; allTrackPcm.push_back({}); writtenFiles.push_back({}); continue;
-            }
-            writeOk = true;
-
-        } else {
-            snprintf(filename, sizeof(filename), "track%02d.wav", track.number);
-            filePath = outPath / filename;
-            FILE* fp = fopen(filePath.string().c_str(), "wb");
-            if (!fp) {
-                printf("  ERROR: cannot write %s\n", filePath.string().c_str());
-                ++totalErrors; allTrackPcm.push_back({}); writtenFiles.push_back({}); continue;
-            }
-            const uint32_t dataBytes = static_cast<uint32_t>(result.data.size());
-            writeWavHeader(fp, dataBytes);
-            fwrite(result.data.data(), 1, result.data.size(), fp);
-            fseek(fp, 0, SEEK_SET);
-            writeWavHeader(fp, dataBytes);
-            fclose(fp);
-            writeOk = true;
+    cb.onVerifyDone = [&](const verify::ArDiscResult& ar) {
+        printf("AccurateRip verification...\n");
+        if (!ar.lookupOk) {
+            printf("  Lookup failed: %s\n\n", ar.error.c_str());
+            return;
         }
-
-        if (writeOk) {
-            printf("  -> %s\n\n", filePath.string().c_str());
-            ++tracksWritten;
+        if (!ar.error.empty()) { printf("  %s\n\n", ar.error.c_str()); return; }
+        printf("  DB pressings found: %d\n", ar.dbEntries);
+        int matched = 0;
+        for (const auto& tr : ar.tracks) {
+            int conf = tr.confidenceV2 > 0 ? tr.confidenceV2 : tr.confidenceV1;
+            printf("  Track %02d: %s  conf=%-3d  CRCv1=%08X  CRCv2=%08X\n",
+                   tr.trackNumber,
+                   tr.matched ? "OK      " : "NO MATCH",
+                   conf, tr.checksumV1, tr.checksumV2);
+            if (tr.matched) ++matched;
         }
-
-        allTrackPcm.push_back(std::move(result.data));
-        writtenFiles.push_back(writeOk ? filePath : std::filesystem::path{});
-    }
-
-    if (tracksWritten == 0) {
-        printf("No tracks written.\n");
-        return 1;
-    }
-
-    // -----------------------------------------------------------------------
-    // AccurateRip verification
-    // -----------------------------------------------------------------------
-    printf("AccurateRip verification...\n");
-    if (static_cast<int>(allTrackPcm.size()) == totalAudioTracks) {
-        auto arResult = verify::AccurateRip::verify(*toc, allTrackPcm);
-
-        if (!arResult.lookupOk) {
-            printf("  Lookup failed: %s\n\n", arResult.error.c_str());
-        } else if (!arResult.error.empty()) {
-            printf("  %s\n\n", arResult.error.c_str());
-        } else {
-            printf("  DB pressings found: %d\n", arResult.dbEntries);
-            int matched = 0;
-            for (const auto& tr : arResult.tracks) {
-                int conf = tr.confidenceV2 > 0 ? tr.confidenceV2 : tr.confidenceV1;
-                const char* ver = tr.confidenceV2 > 0 ? "v2" : (tr.confidenceV1 > 0 ? "v1" : "--");
-                printf("  Track %02d: %s  conf=%-3d  CRCv1=%08X  CRCv2=%08X\n",
-                       tr.trackNumber,
-                       tr.matched ? "OK      " : "NO MATCH",
-                       conf, tr.checksumV1, tr.checksumV2);
-                if (tr.matched) ++matched;
-            }
-            printf("  %d/%d tracks verified accurately\n", matched, totalAudioTracks);
-            if (matched < totalAudioTracks && driveOffset == 0)
-                printf("  Hint: if no tracks match, try --offset to set your drive's read offset.\n");
-        }
-    }
-    printf("\n");
-
-    // -----------------------------------------------------------------------
-    // MusicBrainz metadata lookup + tagging (FLAC only)
-    // -----------------------------------------------------------------------
-    if (format == encode::Format::FLAC) {
-        std::string discId = metadata::DiscId::calculate(*toc);
-        printf("MusicBrainz lookup  (disc ID: %s)...\n", discId.c_str());
-
-        auto mbResult = metadata::MusicBrainz::lookup(discId);
-
-        if (!mbResult.ok || mbResult.releases.empty()) {
-            if (!mbResult.error.empty())
-                printf("  %s\n", mbResult.error.c_str());
-            else
-                printf("  No releases found.\n");
-            printf("  Skipping tag write — tracks already have TRACKNUMBER tags.\n\n");
-
-        } else {
-            // Show available releases
-            printf("  Found %zu release(s):\n\n", mbResult.releases.size());
-            for (size_t i = 0; i < mbResult.releases.size(); ++i) {
-                const auto& r = mbResult.releases[i];
-                printf("  [%zu] %s — %s (%s)%s\n",
-                       i + 1,
-                       r.title.c_str(),
-                       r.artist.c_str(),
-                       r.date.empty() ? "?" : r.date.substr(0, 4).c_str(),
-                       r.country.empty() ? "" : (" [" + r.country + "]").c_str());
-            }
-
-            // Pick a release
-            int selectedIdx = 0;
-            if (mbResult.releases.size() > 1) {
-                printf("\n  Select [1-%zu] (Enter = #1): ", mbResult.releases.size());
-                fflush(stdout);
-                char buf[16] = {};
-                if (fgets(buf, sizeof(buf), stdin)) {
-                    int choice = std::atoi(buf);
-                    if (choice >= 1 && choice <= static_cast<int>(mbResult.releases.size()))
-                        selectedIdx = choice - 1;
-                }
-            }
-
-            const auto& release = mbResult.releases[static_cast<size_t>(selectedIdx)];
-            printf("\n  Using: %s — %s\n\n", release.title.c_str(), release.artist.c_str());
-
-            // Write tags + rename files to artist/album/track pattern
-            int tagged = 0;
-            int audioIdx = 0;  // index into writtenFiles / allTrackPcm
-
-            for (const auto& track : toc->tracks) {
-                if (!track.isAudio) continue;
-
-                const auto& filePath = writtenFiles[static_cast<size_t>(audioIdx)];
-                ++audioIdx;
-
-                if (filePath.empty()) continue;  // this track failed to rip
-
-                // Match track number to MB track list (0-based index)
-                int mbIdx = track.number - 1;
-                if (mbIdx < 0 || mbIdx >= static_cast<int>(release.tracks.size()))
-                    mbIdx = audioIdx - 1;  // fallback: positional
-
-                auto tags = metadata::TrackTags::from(release, mbIdx);
-
-                std::string tagError;
-                if (!metadata::TagWriter::writeFlac(filePath, tags, &tagError)) {
-                    printf("  Track %02d tag error: %s\n", track.number, tagError.c_str());
-                    continue;
-                }
-
-                // Rename to descriptive filename: NN - Title.flac
-                const std::string newName =
-                    std::to_string(track.number / 10) +
-                    std::to_string(track.number % 10) + " - " +
-                    sanitise(tags.title) + ".flac";
-
-                std::filesystem::path newPath = filePath.parent_path() / newName;
-                std::error_code renameEc;
-                std::filesystem::rename(filePath, newPath, renameEc);
-                if (!renameEc)
-                    printf("  Track %02d: %s\n", track.number, newName.c_str());
-                else
-                    printf("  Track %02d: tagged (rename failed: %s)\n",
-                           track.number, renameEc.message().c_str());
-
-                ++tagged;
-            }
-            printf("\n  %d/%d tracks tagged.\n", tagged, tracksWritten);
-        }
+        printf("  %d/%d tracks verified accurately\n", matched, totalAudioTracks);
+        if (matched < totalAudioTracks && driveOffset == 0)
+            printf("  Hint: if no tracks match, try --offset to set your drive's read offset.\n");
         printf("\n");
-    }
+    };
 
-    printf("Done. %d track(s) written", tracksWritten);
-    if (totalErrors > 0) printf(", %d error(s)", totalErrors);
-    printf(".\n");
-    return totalErrors > 0 ? 1 : 0;
+    // onMetadataReady: called by worker thread; must call pipePtr->selectRelease()
+    cb.onMetadataReady = [&pipePtr](const metadata::MbResult& mb) {
+        printf("MusicBrainz lookup found %zu release(s):\n\n", mb.releases.size());
+        for (size_t i = 0; i < mb.releases.size(); ++i) {
+            const auto& r = mb.releases[i];
+            printf("  [%zu] %s — %s (%s)%s\n",
+                   i + 1,
+                   r.title.c_str(), r.artist.c_str(),
+                   r.date.empty() ? "?" : r.date.substr(0, 4).c_str(),
+                   r.country.empty() ? "" : (" [" + r.country + "]").c_str());
+        }
+        int selectedIdx = 0;
+        if (mb.releases.size() > 1) {
+            printf("\n  Select [1-%zu] (Enter = #1): ", mb.releases.size());
+            fflush(stdout);
+            char buf[16] = {};
+            if (fgets(buf, sizeof(buf), stdin)) {
+                int choice = std::atoi(buf);
+                if (choice >= 1 && choice <= static_cast<int>(mb.releases.size()))
+                    selectedIdx = choice - 1;
+            }
+        }
+        const auto& rel = mb.releases[static_cast<size_t>(selectedIdx)];
+        printf("\n  Using: %s — %s\n\n", rel.title.c_str(), rel.artist.c_str());
+        pipePtr->selectRelease(selectedIdx);
+    };
+
+    cb.onOffsetDetected = [](const verify::ArOffsetResult& r) {
+        if (!r.found) {
+            printf("  Offset detection: %s\n\n",
+                   r.error.empty() ? "no match found" : r.error.c_str());
+            return;
+        }
+        printf("  Detected drive offset: %+d samples  "
+               "(conf=%d, %d track(s) matched)\n",
+               r.sampleOffset, r.confidence, r.tracksMatched);
+        printf("  Re-rip with: --offset %d\n\n", r.sampleOffset);
+    };
+
+    cb.onTagsDone = [](int tagged) {
+        printf("  %d track(s) tagged.\n\n", tagged);
+    };
+
+    cb.onError = [&](const std::string& msg) {
+        printf("\nERROR: %s\n", msg.c_str());
+        exitCode = 1;
+    };
+
+    cb.onCancelled = []() { printf("\nCancelled.\n"); };
+    cb.onComplete  = []() { printf("Done.\n"); };
+
+    // Construct the pipeline, then set pipePtr before calling start().
+    // The worker thread only fires after start(), so pipePtr is always valid.
+    pipeline::Pipeline pipe(std::move(cfg), std::move(cb));
+    pipePtr = &pipe;
+
+    pipe.start(drivePath);
+    pipe.waitForCompletion();
+    return exitCode;
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +227,7 @@ static void printUsage(const char* prog) {
     printf("  --rip <drive> [outdir]              Rip all audio tracks to FLAC\n");
     printf("  --rip <drive> [outdir] --wav        Rip to WAV instead\n");
     printf("  --rip <drive> [outdir] --offset N   Set drive read offset in samples\n");
+    printf("  --rip <drive> [outdir] --detect-offset  Auto-detect offset via AccurateRip\n");
     printf("  --help                              Show this help\n");
     printf("\nExamples:\n");
     printf("  %s --toc D:\n", prog);
@@ -415,7 +237,7 @@ static void printUsage(const char* prog) {
 }
 
 int main(int argc, char* argv[]) {
-    printf("AtomicRipper v0.5.0\n");
+    printf("AtomicRipper v0.6.0\n");
     printf("===================\n\n");
 
     if (argc == 1 || (argc == 2 && strcmp(argv[1], "--list-drives") == 0)) {
@@ -442,18 +264,21 @@ int main(int argc, char* argv[]) {
         if (!path.empty() && path.back() == '\\') path.pop_back();
 
         std::string    outDir;
-        encode::Format fmt    = encode::Format::FLAC;
-        int            offset = 0;
+        encode::Format fmt          = encode::Format::FLAC;
+        int            offset       = 0;
+        bool           detectOff    = false;
 
         for (int i = 3; i < argc; ++i) {
             if      (strcmp(argv[i], "--wav") == 0)
                 fmt = encode::Format::WAV;
             else if (strcmp(argv[i], "--offset") == 0 && i + 1 < argc)
                 offset = std::atoi(argv[++i]);
+            else if (strcmp(argv[i], "--detect-offset") == 0)
+                detectOff = true;
             else if (outDir.empty())
                 outDir = argv[i];
         }
-        return doRip(path, outDir, fmt, offset);
+        return doRip(path, outDir, fmt, offset, detectOff);
     }
 
     printUsage(argv[0]); return 1;
