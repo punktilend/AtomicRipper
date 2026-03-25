@@ -22,7 +22,7 @@ add_subdirectory(cli)
 add_subdirectory(tests)
 
 # GUI is optional — skip if Qt6 not installed yet
-find_package(Qt6 QUIET COMPONENTS Widgets Network)
+find_package(Qt6 QUIET COMPONENTS Widgets Network Core)
 if(Qt6_FOUND)
     message(STATUS "Qt6 found — building GUI")
     add_subdirectory(gui)
