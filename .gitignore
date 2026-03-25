@@ -1,0 +1,17 @@
+build/
+.vs/
+*.user
+*.suo
+*.sln.docstates
+CMakeSettings.json
+
+# vcpkg build artifacts (the installed/ dir is managed by vcpkg, keep it)
+vcpkg_installed/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.swp

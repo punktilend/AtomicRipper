@@ -1,0 +1,50 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "windows-msvc-x64",
+      "displayName": "Windows MSVC x64",
+      "description": "Build with MSVC using vcpkg for dependencies",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "C:/Users/adamm/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-windows"
+      },
+      "environment": {
+        "VCPKG_VISUAL_STUDIO_PATH": "C:/Program Files/Microsoft Visual Studio/2022/Community"
+      }
+    },
+    {
+      "name": "windows-msvc-x64-release",
+      "displayName": "Windows MSVC x64 Release",
+      "inherits": "windows-msvc-x64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "displayName": "Debug",
+      "configurePreset": "windows-msvc-x64",
+      "configuration": "Debug"
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "configurePreset": "windows-msvc-x64-release",
+      "configuration": "Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "test-debug",
+      "displayName": "Run Tests (Debug)",
+      "configurePreset": "windows-msvc-x64",
+      "configuration": "Debug"
+    }
+  ]
+}

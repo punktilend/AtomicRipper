@@ -1,0 +1,24 @@
+# Normalize line endings to LF in the repo; checkout as native on each OS
+* text=auto
+
+# Force LF for source files (ensures Linux/macOS builds work correctly)
+*.cpp   text eol=lf
+*.hpp   text eol=lf
+*.h     text eol=lf
+*.c     text eol=lf
+*.cmake text eol=lf
+*.txt   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.sh    text eol=lf
+
+# Windows-specific scripts can keep CRLF
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+
+# Binaries — no line ending conversion
+*.exe   binary
+*.lib   binary
+*.dll   binary
+*.png   binary
+*.ico   binary
