@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -26,6 +27,10 @@ struct FlacEncoder::Impl {
     // Cover art — set via setPicture() before open()
     std::vector<uint8_t> pictureData;
     std::string          pictureMime;
+
+    // Embedded cue sheet — set via addCueSheetTrack() / setCueSheetLeadOut()
+    std::vector<FlacEncoder::CueSheetTrack> cueSheetTracks;
+    uint64_t                                cueSheetLeadOut = 0;
 
     ~Impl() {
         // Finish encoding if open but not yet finalized
@@ -67,6 +72,14 @@ void FlacEncoder::setPicture(const std::vector<uint8_t>& data,
                               const std::string& mimeType) {
     m_impl->pictureData = data;
     m_impl->pictureMime = mimeType;
+}
+
+void FlacEncoder::addCueSheetTrack(const CueSheetTrack& track) {
+    m_impl->cueSheetTracks.push_back(track);
+}
+
+void FlacEncoder::setCueSheetLeadOut(uint64_t totalSamples) {
+    m_impl->cueSheetLeadOut = totalSamples;
 }
 
 std::string FlacEncoder::lastError() const {
@@ -161,7 +174,61 @@ bool FlacEncoder::open(const std::filesystem::path& outputPath,
         m_impl->metaObjects.push_back(seekTable);
     }
 
-    // 3. Padding — allows tag editing without rewriting the audio stream
+    // 4. CUESHEET block (single-file / album rip, optional)
+    if (!m_impl->cueSheetTracks.empty()) {
+        auto* cs = FLAC__metadata_object_new(FLAC__METADATA_TYPE_CUESHEET);
+        if (cs) {
+            cs->data.cue_sheet.lead_in = 88200;  // 2 s at 44100 Hz (CD standard)
+            cs->data.cue_sheet.is_cd   = true;
+            memset(cs->data.cue_sheet.media_catalog_number, 0,
+                   sizeof(cs->data.cue_sheet.media_catalog_number));
+
+            for (const auto& t : m_impl->cueSheetTracks) {
+                FLAC__StreamMetadata_CueSheet_Track ct{};
+                ct.offset       = t.sampleOffset;
+                ct.number       = static_cast<FLAC__byte>(t.number);
+                ct.type         = t.isAudio ? 0u : 1u;
+                ct.pre_emphasis = false;
+                ct.num_indices  = 0;
+                ct.indices      = nullptr;
+                memset(ct.isrc, 0, sizeof(ct.isrc));
+
+                // insert_track with copy=true — libFLAC copies the struct
+                FLAC__metadata_object_cuesheet_insert_track(
+                    cs,
+                    static_cast<unsigned>(cs->data.cue_sheet.num_tracks),
+                    &ct, /*copy=*/true);
+
+                // Add INDEX 01 (data start) at offset 0 relative to track
+                FLAC__StreamMetadata_CueSheet_Index idx{};
+                idx.offset = 0;
+                idx.number = 1;
+                unsigned trackPos = cs->data.cue_sheet.num_tracks - 1;
+                FLAC__metadata_object_cuesheet_track_insert_index(
+                    cs, trackPos, 0, idx);
+            }
+
+            // Lead-out track (number 170 for CD)
+            if (m_impl->cueSheetLeadOut > 0) {
+                FLAC__StreamMetadata_CueSheet_Track lo{};
+                lo.offset       = m_impl->cueSheetLeadOut;
+                lo.number       = 170;
+                lo.type         = 0;
+                lo.pre_emphasis = false;
+                lo.num_indices  = 0;
+                lo.indices      = nullptr;
+                memset(lo.isrc, 0, sizeof(lo.isrc));
+                FLAC__metadata_object_cuesheet_insert_track(
+                    cs,
+                    static_cast<unsigned>(cs->data.cue_sheet.num_tracks),
+                    &lo, /*copy=*/true);
+            }
+
+            m_impl->metaObjects.push_back(cs);
+        }
+    }
+
+    // 5. Padding — allows tag editing without rewriting the audio stream
     auto* padding = FLAC__metadata_object_new(FLAC__METADATA_TYPE_PADDING);
     if (padding) {
         padding->length = 8192;

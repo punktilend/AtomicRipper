@@ -33,6 +33,21 @@ public:
     // Must be called before open(). mimeType: "image/jpeg" or "image/png".
     void setPicture(const std::vector<uint8_t>& data, const std::string& mimeType);
 
+    // ---------------------------------------------------------------------------
+    // CUESHEET block support (single-file / album rip)
+    // Must be called before open(); addCueSheetTrack() for each audio track in
+    // order, then setCueSheetLeadOut() with the total sample count.
+    // ---------------------------------------------------------------------------
+    struct CueSheetTrack {
+        int      number;              // CD track number (1–99)
+        uint64_t sampleOffset;        // offset from file start in PCM samples
+        bool     isAudio = true;
+    };
+
+    void addCueSheetTrack(const CueSheetTrack& track);
+    // totalSamples: total PCM samples in the output file (lead-out position)
+    void setCueSheetLeadOut(uint64_t totalSamples);
+
     // IEncoder interface
     bool        open(const std::filesystem::path& outputPath,
                      const EncoderSettings& settings) override;

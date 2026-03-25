@@ -11,6 +11,7 @@ add_library(atomicripper-core STATIC
     metadata/MusicBrainz.cpp
     metadata/TagWriter.cpp
     metadata/CoverArt.cpp
+    metadata/CueSheet.cpp
     rip/RipEngine.cpp
     encode/FlacEncoder.cpp
     encode/WavEncoder.cpp

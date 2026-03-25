@@ -56,7 +56,8 @@ static int doRip(const std::string& drivePath,
                  encode::Format     format,
                  int                driveOffset,
                  bool               detectOffset = false,
-                 bool               eject        = false) {
+                 bool               eject        = false,
+                 bool               singleFile   = false) {
     std::filesystem::path outPath = outputDir.empty()
         ? std::filesystem::current_path()
         : std::filesystem::path(outputDir);
@@ -78,6 +79,7 @@ static int doRip(const std::string& drivePath,
     cfg.writeTags                        = (format == encode::Format::FLAC);
     cfg.ejectWhenDone                    = eject;
     cfg.autoSelectRelease                = false;
+    cfg.singleFile                       = singleFile && (format == encode::Format::FLAC);
 
     // State shared across callbacks
     int  exitCode        = 0;
@@ -231,6 +233,7 @@ static void printUsage(const char* prog) {
     printf("  --rip <drive> [outdir] --offset N   Set drive read offset in samples\n");
     printf("  --rip <drive> [outdir] --detect-offset  Auto-detect offset via AccurateRip\n");
     printf("  --rip <drive> [outdir] --eject          Eject disc when rip completes\n");
+    printf("  --rip <drive> [outdir] --single-file   Encode to one FLAC with embedded cue\n");
     printf("  --help                              Show this help\n");
     printf("\nExamples:\n");
     printf("  %s --toc D:\n", prog);
@@ -240,7 +243,7 @@ static void printUsage(const char* prog) {
 }
 
 int main(int argc, char* argv[]) {
-    printf("AtomicRipper v0.6.0\n");
+    printf("AtomicRipper v0.7.0\n");
     printf("===================\n\n");
 
     if (argc == 1 || (argc == 2 && strcmp(argv[1], "--list-drives") == 0)) {
@@ -271,10 +274,13 @@ int main(int argc, char* argv[]) {
         int            offset       = 0;
         bool           detectOff    = false;
         bool           ejectAfter   = false;
+        bool           singleFile   = false;
 
         for (int i = 3; i < argc; ++i) {
             if      (strcmp(argv[i], "--wav") == 0)
                 fmt = encode::Format::WAV;
+            else if (strcmp(argv[i], "--single-file") == 0)
+                singleFile = true;
             else if (strcmp(argv[i], "--offset") == 0 && i + 1 < argc)
                 offset = std::atoi(argv[++i]);
             else if (strcmp(argv[i], "--detect-offset") == 0)
@@ -284,7 +290,7 @@ int main(int argc, char* argv[]) {
             else if (outDir.empty())
                 outDir = argv[i];
         }
-        return doRip(path, outDir, fmt, offset, detectOff, ejectAfter);
+        return doRip(path, outDir, fmt, offset, detectOff, ejectAfter, singleFile);
     }
 
     printUsage(argv[0]); return 1;

@@ -77,7 +77,11 @@ struct PipelineConfig {
     bool autoDetectOffset  = false;  // sweep ±1176 samples if no tracks match at offset=0
     bool writeTags         = true;   // write tags via TagLib (FLAC only)
     bool autoSelectRelease = false;  // pick the first release automatically
+    bool writeCueSheet     = true;   // write a .cue file alongside the tracks
     bool ejectWhenDone     = false;  // eject disc tray after rip completes
+    // Single-file mode: encode all audio tracks into one FLAC with an embedded
+    // CUESHEET block and a companion .cue file (FLAC only; ignored for WAV).
+    bool singleFile        = false;
 };
 
 // ---------------------------------------------------------------------------

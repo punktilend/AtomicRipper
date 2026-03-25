@@ -6,6 +6,7 @@
 #include "../encode/FlacEncoder.hpp"
 #include "../encode/WavEncoder.hpp"
 #include "../metadata/CoverArt.hpp"
+#include "../metadata/CueSheet.hpp"
 #include "../metadata/DiscId.hpp"
 #include "../metadata/TagWriter.hpp"
 
@@ -338,6 +339,96 @@ void Pipeline::workerThread(std::string drivePath) {
     }
 
     // ------------------------------------------------------------------
+    // 5b. Single-file FLAC encode (optional; FLAC format only)
+    //     All ripped tracks are concatenated into one .flac with an
+    //     embedded CUESHEET block.  writtenFiles[i] all point to this
+    //     one file so that tagging and cue-sheet steps work unchanged.
+    // ------------------------------------------------------------------
+    std::filesystem::path    singleFilePath;
+    std::vector<uint64_t>    singleFileTrackOffsets;  // stereo frames; used by cue sheet step
+
+    if (m_config.singleFile && isFlac && !allTrackPcm.empty()) {
+        // Build album filename from MB metadata (or "disc.flac")
+        std::string albumName = "disc";
+        if (release) {
+            std::string art = release->artist.empty() ? "" : sanitise(release->artist);
+            std::string ttl = release->title.empty()  ? "" : sanitise(release->title);
+            if (!art.empty() || !ttl.empty())
+                albumName = (art.empty() ? ttl : (ttl.empty() ? art : art + " - " + ttl));
+        }
+        singleFilePath = m_config.outputDir / (albumName + ".flac");
+
+        // Compute per-track stereo-frame offsets.
+        // CD-DA: 4 bytes per stereo frame (2 bytes L + 2 bytes R).
+        // FLAC encoder, CUESHEET block, and cue sheet all use stereo frames.
+        // lbaToMsf() divides by 588 (44100 / 75 frames/sec) — same unit.
+        singleFileTrackOffsets.reserve(allTrackPcm.size());
+        uint64_t accumFrames = 0;
+        for (const auto& pcm : allTrackPcm) {
+            singleFileTrackOffsets.push_back(accumFrames);
+            accumFrames += pcm.size() / 4u;  // bytes / 4 = stereo frames
+        }
+        const uint64_t totalFrames = accumFrames;
+
+        encode::EncoderSettings es = m_config.encoderSettings;
+        es.format       = encode::Format::FLAC;
+        es.totalSamples = totalFrames;
+
+        encode::FlacEncoder sfEnc;
+
+        // Set album-level tags
+        if (release) {
+            sfEnc.setTag("ARTIST",     release->artist);
+            sfEnc.setTag("ALBUM",      release->title);
+            sfEnc.setTag("DATE",       release->date.substr(0, 4));
+            sfEnc.setTag("TRACKTOTAL", std::to_string(totalAudio));
+        }
+        if (coverArt.ok)
+            sfEnc.setPicture(coverArt.data, coverArt.mimeType);
+
+        // Add CUESHEET tracks
+        {
+            int ai = 0;
+            for (const auto& track : toc.tracks) {
+                if (!track.isAudio) continue;
+                encode::FlacEncoder::CueSheetTrack ct;
+                ct.number       = track.number;
+                ct.sampleOffset = singleFileTrackOffsets[static_cast<size_t>(ai)];
+                ct.isAudio      = true;
+                sfEnc.addCueSheetTrack(ct);
+                ++ai;
+            }
+            sfEnc.setCueSheetLeadOut(totalFrames);
+        }
+
+        std::string sfErr;
+        bool sfOk = false;
+        if (sfEnc.open(singleFilePath, es)) {
+            sfOk = true;
+            for (const auto& pcm : allTrackPcm) {
+                if (pcm.empty()) continue;
+                std::vector<int32_t> samples;
+                encode::cdBytesToSamples(pcm.data(), pcm.size(), samples);
+                if (!sfEnc.writeSamples(samples)) { sfOk = false; break; }
+            }
+            if (sfOk) sfOk = sfEnc.finalize();
+            if (!sfOk) sfErr = sfEnc.lastError();
+        } else {
+            sfErr = sfEnc.lastError();
+        }
+
+        if (!sfOk && m_cb.onError)
+            m_cb.onError("Single-file encode failed: " + sfErr);
+
+        if (sfOk) {
+            // Point all writtenFiles entries to the single output file so that
+            // the tagging and cue sheet steps work unchanged.
+            for (auto& p : writtenFiles)
+                p = singleFilePath;
+        }
+    }
+
+    // ------------------------------------------------------------------
     // 6.  AccurateRip verification
     // ------------------------------------------------------------------
     if (m_config.verifyAccurateRip && static_cast<int>(allTrackPcm.size()) == totalAudio) {
@@ -381,6 +472,13 @@ void Pipeline::workerThread(std::string drivePath) {
             const auto& filePath = writtenFiles[static_cast<size_t>(ai)];
             if (filePath.empty()) continue;
 
+            // In single-file mode the encoder already set album-level tags;
+            // skip per-track tagging and renaming to avoid clobbering them.
+            if (m_config.singleFile) {
+                ++tagged;
+                continue;
+            }
+
             // MB track list is 0-based audio tracks; use ai as the index
             int mbIdx = ai;
             if (mbIdx >= static_cast<int>(release->tracks.size()))
@@ -412,7 +510,32 @@ void Pipeline::workerThread(std::string drivePath) {
     }
 
     // ------------------------------------------------------------------
-    // 8.  Eject (optional)
+    // 8.  Cue sheet (optional)
+    // ------------------------------------------------------------------
+    if (m_config.writeCueSheet) {
+        const std::string discId = metadata::DiscId::calculate(toc);
+
+        std::string cueContent;
+        if (m_config.singleFile && !singleFilePath.empty()) {
+            // Single-file mode: one FILE line, per-track INDEX offsets
+            std::vector<std::filesystem::path> sfPaths = { singleFilePath };
+            cueContent = metadata::CueSheet::generate(
+                toc, sfPaths, release, discId, singleFileTrackOffsets);
+        } else {
+            cueContent = metadata::CueSheet::generate(
+                toc, writtenFiles, release, discId);
+        }
+
+        const std::string cueName  = metadata::CueSheet::filename(release);
+        const std::filesystem::path cuePath = m_config.outputDir / cueName;
+
+        std::string cueErr;
+        if (!metadata::CueSheet::write(cuePath, cueContent, &cueErr) && m_cb.onError)
+            m_cb.onError("Cue sheet: " + cueErr);  // non-fatal
+    }
+
+    // ------------------------------------------------------------------
+    // 9.  Eject (optional)
     // ------------------------------------------------------------------
     if (m_config.ejectWhenDone) {
         drive::Drive drv(drivePath, drivePath);
@@ -420,7 +543,7 @@ void Pipeline::workerThread(std::string drivePath) {
     }
 
     // ------------------------------------------------------------------
-    // 9.  Done
+    // 10. Done
     // ------------------------------------------------------------------
     setState(PipelineState::Complete);
     if (m_cb.onComplete) m_cb.onComplete();
