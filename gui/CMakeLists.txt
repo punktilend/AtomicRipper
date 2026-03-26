@@ -10,6 +10,7 @@ add_executable(atomicripper-gui WIN32
     ReleaseDialog.cpp
     TrackTableWidget.hpp
     TrackTableWidget.cpp
+    resources/app.rc
 )
 
 target_link_libraries(atomicripper-gui PRIVATE
