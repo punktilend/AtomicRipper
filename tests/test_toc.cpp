@@ -64,6 +64,25 @@ TEST_CASE("MusicBrainz Disc ID — known disc", "[discid]") {
     }
 }
 
+TEST_CASE("MusicBrainz Disc ID — MusicBrainz documentation example", "[discid]") {
+    drive::TOC toc;
+    toc.firstTrack = 1;
+    toc.lastTrack = 6;
+    toc.leadOutLBA = 95312;
+
+    const uint32_t lbas[] = {0, 15213, 32164, 46442, 63264, 80339};
+    for (int i = 0; i < 6; ++i) {
+        drive::TrackInfo t;
+        t.number = i + 1;
+        t.isAudio = true;
+        t.lba = lbas[i];
+        t.sectorCount = 0;
+        toc.tracks.push_back(t);
+    }
+
+    REQUIRE(metadata::DiscId::calculate(toc) == "49HHV7Eb8UKF3aQiNmu1GR8vKTY-");
+}
+
 TEST_CASE("MusicBrainz Disc ID — invalid TOC returns empty", "[discid]") {
     drive::TOC bad;
     REQUIRE(metadata::DiscId::calculate(bad).empty());

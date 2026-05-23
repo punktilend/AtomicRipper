@@ -1,4 +1,6 @@
 #pragma once
+#include "../drive/TOC.hpp"
+
 #include <string>
 #include <vector>
 
@@ -28,6 +30,10 @@ struct MbRelease {
     std::string date;           // "1973", "1973-03-01", etc.
     std::string country;        // two-letter ISO country code
     std::string label;          // record label (if available)
+    std::string catalogNumber;  // catalogue number (if available)
+    std::string genre;
+    std::string composer;
+    std::string comment;
     int         discNumber  = 1;
     int         totalDiscs  = 1;
 
@@ -57,6 +63,14 @@ public:
     // Look up a disc by its MusicBrainz disc ID string.
     // discId must be the 28-character base64url string from DiscId::calculate().
     static MbResult lookup(const std::string& discId);
+
+    // Look up a disc by Disc ID plus TOC. Supplying TOC lets MusicBrainz do
+    // fuzzy matching when the exact Disc ID is not attached to a release yet.
+    static MbResult lookup(const std::string& discId, const drive::TOC& toc);
+
+    // Fill release-level fields that are often omitted by the disc-ID lookup,
+    // such as label, catalogue number, genre/tags, and media details.
+    static bool enrichRelease(MbRelease& release, std::string* error = nullptr);
 };
 
 } // namespace atomicripper::metadata

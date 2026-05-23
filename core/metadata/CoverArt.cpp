@@ -36,10 +36,13 @@ CoverArtResult CoverArt::fetchFront(const std::string& mbReleaseId) {
     const std::string url =
         "https://coverartarchive.org/release/" + mbReleaseId + "/front";
 
-    // cpr follows redirects by default (libcurl behaviour) — no extra option needed
     cpr::Response resp = cpr::Get(
         cpr::Url{url},
-        cpr::Header{{"User-Agent", "AtomicRipper/0.6 ( https://github.com/punktilend/AtomicRipper )"}},
+        cpr::Header{
+            {"User-Agent", "AtomicRipper/0.7.1 (https://github.com/punktilend/AtomicRipper)"},
+            {"Accept", "image/jpeg,image/png,image/*;q=0.9,*/*;q=0.5"}
+        },
+        cpr::Redirect{true},
         cpr::Timeout{15000}
     );
 

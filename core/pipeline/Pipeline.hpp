@@ -4,6 +4,7 @@
 #include "../metadata/MusicBrainz.hpp"
 #include "../rip/RipEngine.hpp"
 #include "../verify/AccurateRip.hpp"
+// #include "../upload/B2Uploader.hpp"   // uncomment to enable B2 upload support
 
 #include <atomic>
 #include <condition_variable>
@@ -60,6 +61,12 @@ struct PipelineCallbacks {
     std::function<void()>                                     onComplete;
     std::function<void(const std::string& message)>           onError;
     std::function<void()>                                     onCancelled;
+
+    // B2 upload callbacks — uncomment when upload support is enabled (see above)
+    /*
+    std::function<void(const std::string& b2Path, int index, int total)> onUploadProgress;
+    std::function<void(const upload::B2UploadResult&)>                   onUploadDone;
+    */
 };
 
 // ---------------------------------------------------------------------------
@@ -78,7 +85,26 @@ struct PipelineConfig {
     bool writeTags         = true;   // write tags via TagLib (FLAC only)
     bool autoSelectRelease = false;  // pick the first release automatically
     bool writeCueSheet     = true;   // write a .cue file alongside the tracks
+    bool writeRipLog       = true;   // write AtomicRipper.log proof/audit file
+    bool writeUploadInfo   = true;   // write RED-style paste-ready upload fields
     bool ejectWhenDone     = false;  // eject disc tray after rip completes
+    bool useManualMetadata = false;  // use GUI-entered album/track fields when no online release is selected
+    metadata::MbRelease manualRelease;
+
+    // -----------------------------------------------------------------------
+    // B2 upload — send completed rip straight to the AtomicBlast B2 bucket
+    // -----------------------------------------------------------------------
+    // TO ENABLE:
+    //   1. Uncomment #include "../upload/B2Uploader.hpp" at the top of this file
+    //   2. Uncomment upload/B2Uploader.cpp in core/CMakeLists.txt
+    //   3. Uncomment the two B2 callbacks below in PipelineCallbacks
+    //   4. Uncomment step 11 in pipeline/Pipeline.cpp
+    //   5. Set uploadToB2 = true and fill in b2Config with your credentials
+    /*
+    bool               uploadToB2 = false;  // set true to upload after tagging
+    upload::B2Config   b2Config;            // credentials + bucket (see B2Uploader.hpp)
+    */
+
     // Single-file mode: encode all audio tracks into one FLAC with an embedded
     // CUESHEET block and a companion .cue file (FLAC only; ignored for WAV).
     bool singleFile        = false;

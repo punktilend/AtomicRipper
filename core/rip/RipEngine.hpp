@@ -25,6 +25,7 @@ struct SectorResult {
     std::vector<uint8_t> data;        // 2352 bytes of raw CD-DA audio
     uint8_t              confidence;  // how many reads agreed (0 = no consensus)
     bool                 hasC2Errors; // drive reported bit errors in this sector
+    bool                 ioError;     // true if every SCSI read attempt failed (hardware/permission error)
     int                  retries;     // extra reads needed beyond the initial passes
 };
 
@@ -59,6 +60,7 @@ struct TrackRipResult {
     uint32_t                  crc32    = 0;
     bool                      ok       = false;
     bool                      cancelled = false;
+    std::string               error;       // set when ok=false and not cancelled
 };
 
 // ---------------------------------------------------------------------------
@@ -104,6 +106,10 @@ private:
     // Stored as void* so windows.h stays out of this header.
     // Invariant: nullptr == not open, (void*)-1 == INVALID_HANDLE_VALUE
     void* m_handle = nullptr;
+
+    // Last error codes from readSectors() — used to build diagnostic messages.
+    uint32_t m_lastWinError   = 0;  // GetLastError() when DeviceIoControl fails
+    uint8_t  m_lastScsiStatus = 0;  // SCSI status byte when non-zero
 
     // Send a READ CD (0xBE) SCSI command via SPTI.
     // outBuf must be at least count * (withC2 ? 2646 : 2352) bytes.

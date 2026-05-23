@@ -20,6 +20,8 @@ struct TrackTags {
     std::string discNumber;      // "1"
     std::string discTotal;       // "1"
     std::string label;
+    std::string genre;
+    std::string composer;
     std::string comment;
 
     // MusicBrainz identifiers (written as standard Vorbis Comment fields)

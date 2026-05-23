@@ -16,6 +16,9 @@ TrackTags TrackTags::from(const MbRelease& release, int trackIndex) {
     t.albumArtistSort = release.artistSortName;
     t.date            = release.date;
     t.label           = release.label;
+    t.genre           = release.genre;
+    t.composer        = release.composer;
+    t.comment         = release.comment;
     t.mbReleaseId     = release.id;
     t.mbAlbumArtistId = release.artistId;
     t.discNumber      = std::to_string(release.discNumber);
@@ -80,6 +83,8 @@ bool TagWriter::writeFlac(const std::filesystem::path& filePath,
     set("DISCTOTAL",            tags.discTotal);
     set("TOTALDISCS",           tags.discTotal);    // legacy alias
     set("LABEL",                tags.label);
+    set("GENRE",                tags.genre);
+    set("COMPOSER",             tags.composer);
     set("COMMENT",              tags.comment);
 
     // MusicBrainz IDs

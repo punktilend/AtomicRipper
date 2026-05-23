@@ -513,9 +513,16 @@ ArOffsetResult AccurateRip::detectOffset(
     result.sampleOffset  = bestOffset;
     result.confidence    = bestScore > 0 ? bestScore : 0;
     result.tracksMatched = bestMatched;
-    result.found         = (bestMatched > 0);
-    if (!result.found)
-        result.error = "no offset produced a match against the AccurateRip database";
+
+    // A single matching track is not enough to configure a drive offset.  The
+    // offset has to agree across tracks; otherwise scratched or otherwise bad
+    // audio can produce a misleading one-track match.
+    result.found = (bestMatched >= 2);
+    if (!result.found) {
+        result.error = bestMatched > 0
+            ? "Offset values did not match across tracks; possibly this disc has scratches. Please try another disc."
+            : "no offset produced a match against the AccurateRip database";
+    }
 
     return result;
 }

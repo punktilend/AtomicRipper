@@ -11,7 +11,12 @@
 #include "../metadata/TagWriter.hpp"
 
 #include <cassert>
+#include <cctype>
+#include <ctime>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -44,6 +49,276 @@ std::string makeTrackName(int number, const std::string& title, const char* ext)
     if (title.empty())
         return std::string(num) + "." + ext;
     return std::string(num) + " - " + sanitise(title) + "." + ext;
+}
+
+std::string releaseFolderName(const metadata::MbRelease* release, encode::Format format) {
+    const std::string artist = release && !release->artist.empty()
+        ? release->artist
+        : "Unknown Artist";
+    const std::string album = release && !release->title.empty()
+        ? release->title
+        : "Unknown Album";
+    const std::string year = release && release->date.size() >= 4
+        ? release->date.substr(0, 4)
+        : "Unknown Year";
+    const char* fmt = format == encode::Format::FLAC ? "FLAC" : "WAV";
+    return sanitise(artist + " - " + album + " (" + year + ") [" + fmt + "]");
+}
+
+std::filesystem::path nextAvailableFolder(const std::filesystem::path& base,
+                                          const std::string& folderName) {
+    std::filesystem::path candidate = base / folderName;
+    if (!std::filesystem::exists(candidate))
+        return candidate;
+
+    for (int suffix = 2; suffix < 1000; ++suffix) {
+        candidate = base / (folderName + " (" + std::to_string(suffix) + ")");
+        if (!std::filesystem::exists(candidate))
+            return candidate;
+    }
+    return base / (folderName + " (" + std::to_string(std::time(nullptr)) + ")");
+}
+
+std::string yearFromDate(const std::string& date) {
+    return date.size() >= 4 ? date.substr(0, 4) : std::string{};
+}
+
+std::string ripModeName(rip::RipMode mode) {
+    switch (mode) {
+    case rip::RipMode::Burst:    return "Burst";
+    case rip::RipMode::Secure:   return "Secure";
+    case rip::RipMode::Paranoia: return "Paranoia";
+    }
+    return "Unknown";
+}
+
+std::string formatMsf(uint32_t sectors) {
+    const uint32_t minutes = sectors / (75u * 60u);
+    const uint32_t seconds = (sectors / 75u) % 60u;
+    const uint32_t frames = sectors % 75u;
+    std::ostringstream out;
+    out << std::setfill('0') << std::setw(2) << minutes << ':'
+        << std::setw(2) << seconds << ':' << std::setw(2) << frames;
+    return out.str();
+}
+
+std::string formatHex(uint32_t value) {
+    std::ostringstream out;
+    out << std::uppercase << std::hex << std::setfill('0') << std::setw(8) << value;
+    return out.str();
+}
+
+std::string trackerTagFromGenre(std::string genre) {
+    std::string out;
+    bool lastDot = false;
+    for (unsigned char ch : genre) {
+        if (std::isalnum(ch)) {
+            out += static_cast<char>(std::tolower(ch));
+            lastDot = false;
+        } else if (!lastDot && !out.empty()) {
+            out += '.';
+            lastDot = true;
+        }
+    }
+    while (!out.empty() && out.back() == '.')
+        out.pop_back();
+    return out;
+}
+
+std::string trackTitle(const metadata::MbRelease* release, size_t index, int trackNumber) {
+    if (release && index < release->tracks.size() && !release->tracks[index].title.empty())
+        return release->tracks[index].title;
+    char fallback[16];
+    std::snprintf(fallback, sizeof(fallback), "Track%02d", trackNumber);
+    return fallback;
+}
+
+void writeRipLog(const std::filesystem::path& path,
+                 const std::string& drivePath,
+                 const PipelineConfig& cfg,
+                 const drive::TOC& toc,
+                 const metadata::MbRelease* release,
+                 const std::vector<TrackDoneInfo>& trackInfo,
+                 const std::vector<std::filesystem::path>& finalFiles,
+                 const verify::ArDiscResult* arResult,
+                 const verify::ArOffsetResult* offsetResult,
+                 bool cueWritten)
+{
+    std::ofstream out(path, std::ios::binary);
+    if (!out) return;
+
+    const std::time_t now = std::time(nullptr);
+    char timeBuf[64] = {};
+#ifdef _WIN32
+    std::tm tm{};
+    localtime_s(&tm, &now);
+    std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &tm);
+#else
+    std::tm* tm = std::localtime(&now);
+    if (tm) std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", tm);
+#endif
+
+    out << "AtomicRipper Rip Log\n";
+    out << "Generated: " << timeBuf << "\n\n";
+    out << "Drive: " << drivePath << "\n";
+    out << "Rip mode: " << ripModeName(cfg.ripSettings.mode) << "\n";
+    out << "Max retries: " << cfg.ripSettings.maxRetries << "\n";
+    out << "Minimum matching reads: " << cfg.ripSettings.minMatches << "\n";
+    out << "C2 pointers: " << (cfg.ripSettings.useC2Errors ? "enabled" : "disabled") << "\n";
+    out << "Read offset correction: " << (cfg.ripSettings.driveOffset >= 0 ? "+" : "")
+        << cfg.ripSettings.driveOffset << " samples\n";
+    out << "Output format: " << (cfg.format == encode::Format::FLAC ? "FLAC" : "WAV") << "\n";
+    out << "Cue sheet: " << (cueWritten ? "written" : "not written") << "\n\n";
+
+    if (release) {
+        out << "Artist: " << release->artist << "\n";
+        out << "Album: " << release->title << "\n";
+        out << "Date: " << release->date << "\n";
+        out << "Label: " << release->label << "\n";
+        out << "Catalogue number: " << release->catalogNumber << "\n\n";
+    }
+
+    out << "TOC\n";
+    out << "First track: " << toc.firstTrack << "\n";
+    out << "Last track: " << toc.lastTrack << "\n";
+    out << "Lead-out LBA: " << toc.leadOutLBA << "\n";
+    out << "AccurateRip ID1: " << formatHex(verify::AccurateRip::discId1(toc)) << "\n";
+    out << "AccurateRip ID2: " << formatHex(verify::AccurateRip::discId2(toc)) << "\n";
+    out << "CDDB ID: " << formatHex(verify::AccurateRip::cddbId(toc)) << "\n\n";
+
+    out << "Tracks\n";
+    size_t audioIndex = 0;
+    for (const auto& track : toc.tracks) {
+        if (!track.isAudio) continue;
+        const TrackDoneInfo* info = audioIndex < trackInfo.size() ? &trackInfo[audioIndex] : nullptr;
+        out << std::setw(2) << std::setfill('0') << track.number << std::setfill(' ')
+            << "  " << trackTitle(release, audioIndex, track.number)
+            << "  start " << formatMsf(track.lba)
+            << "  length " << formatMsf(track.sectorCount);
+        if (info) {
+            out << "  CRC32 " << formatHex(info->crc32)
+                << "  suspect sectors " << info->suspectSectors
+                << "  C2 sectors " << info->c2Sectors
+                << "  status " << (info->ok ? "OK" : "FAILED");
+        }
+        if (audioIndex < finalFiles.size() && !finalFiles[audioIndex].empty())
+            out << "\n    file: " << finalFiles[audioIndex].filename().string();
+        out << "\n";
+        ++audioIndex;
+    }
+
+    if (arResult) {
+        out << "\nAccurateRip\n";
+        if (!arResult->lookupOk) {
+            out << "Lookup failed: " << arResult->error << "\n";
+        } else {
+            out << "Database entries: " << arResult->dbEntries << "\n";
+            for (const auto& track : arResult->tracks) {
+                out << "Track " << track.trackNumber
+                    << ": " << (track.matched ? "verified" : "not verified")
+                    << "  V1 " << formatHex(track.checksumV1) << " conf " << track.confidenceV1
+                    << "  V2 " << formatHex(track.checksumV2) << " conf " << track.confidenceV2
+                    << "\n";
+            }
+        }
+    }
+
+    if (offsetResult) {
+        out << "\nOffset detection\n";
+        if (offsetResult->found) {
+            out << "Detected offset: " << (offsetResult->sampleOffset >= 0 ? "+" : "")
+                << offsetResult->sampleOffset << " samples, confidence "
+                << offsetResult->confidence << ", tracks matched "
+                << offsetResult->tracksMatched << "\n";
+        } else {
+            out << "No offset detected: " << offsetResult->error << "\n";
+        }
+    }
+}
+
+void writeUploadInfo(const std::filesystem::path& path,
+                     const PipelineConfig& cfg,
+                     const drive::TOC& toc,
+                     const metadata::MbRelease* release,
+                     const std::vector<TrackDoneInfo>& trackInfo,
+                     const verify::ArDiscResult* arResult,
+                     bool cueWritten,
+                     bool coverWritten)
+{
+    std::ofstream out(path, std::ios::binary);
+    if (!out) return;
+
+    const std::string artist = release && !release->artist.empty() ? release->artist : "Unknown Artist";
+    const std::string title = release && !release->title.empty() ? release->title : "Unknown Title";
+    const std::string year = release ? yearFromDate(release->date) : std::string{};
+    const std::string tag = release ? trackerTagFromGenre(release->genre) : std::string{};
+
+    out << "RED / private-tracker upload helper\n";
+    out << "Do not paste your personal announce URL into AtomicRipper.\n";
+    out << "Do not paste the rip log into Release description; attach/include the log with the torrent files.\n\n";
+    out << "Type: Music\n";
+    out << "Artist(s): " << artist << "\n";
+    out << "Album title: " << title << "\n";
+    out << "Initial year: " << year << "\n";
+    out << "Release type: Album\n";
+    out << "Edition year: " << year << "\n";
+    out << "Edition title: \n";
+    out << "Record label: " << (release ? release->label : std::string{}) << "\n";
+    out << "Catalogue number: " << (release ? release->catalogNumber : std::string{}) << "\n";
+    out << "Scene: No\n";
+    out << "Format: " << (cfg.format == encode::Format::FLAC ? "FLAC" : "WAV") << "\n";
+    out << "Bitrate: Lossless\n";
+    out << "Multi-format uploader: No\n";
+    out << "Media: CD\n";
+    out << "Tags: " << tag << "\n";
+    out << "Image: " << (coverWritten ? "rehost cover.jpg / cover.png as an HTTPS image URL" : "") << "\n\n";
+
+    out << "Album description:\n";
+    out << artist << " - " << title << "\n\n";
+    out << "Track listing:\n";
+    size_t audioIndex = 0;
+    for (const auto& track : toc.tracks) {
+        if (!track.isAudio) continue;
+        out << std::setw(2) << std::setfill('0') << track.number << std::setfill(' ')
+            << ". " << trackTitle(release, audioIndex, track.number)
+            << " [" << formatMsf(track.sectorCount) << "]\n";
+        ++audioIndex;
+    }
+
+    out << "\nRelease description:\n";
+    out << "Ripped from audio CD with AtomicRipper.\n";
+    out << "Rip mode: " << ripModeName(cfg.ripSettings.mode)
+        << "; read offset: " << (cfg.ripSettings.driveOffset >= 0 ? "+" : "")
+        << cfg.ripSettings.driveOffset << " samples"
+        << "; C2 pointers: " << (cfg.ripSettings.useC2Errors ? "enabled" : "disabled")
+        << "; max retries: " << cfg.ripSettings.maxRetries << ".\n";
+    out << "Included proof files: AtomicRipper.log";
+    if (cueWritten) out << ", CUE sheet";
+    out << ".\n";
+
+    int suspect = 0;
+    int c2 = 0;
+    for (const auto& info : trackInfo) {
+        suspect += info.suspectSectors;
+        c2 += info.c2Sectors;
+    }
+    out << "Rip quality: " << suspect << " suspect sector(s), " << c2 << " C2 sector(s).\n";
+
+    if (arResult) {
+        int matched = 0;
+        for (const auto& track : arResult->tracks)
+            if (track.matched) ++matched;
+        if (arResult->lookupOk) {
+            out << "AccurateRip: " << matched << " / " << arResult->tracks.size()
+                << " tracks verified";
+            if (arResult->dbEntries > 0)
+                out << " against " << arResult->dbEntries << " database entr"
+                    << (arResult->dbEntries == 1 ? "y" : "ies");
+            out << ".\n";
+        } else if (!arResult->error.empty()) {
+            out << "AccurateRip: lookup did not verify this disc (" << arResult->error << ").\n";
+        }
+    }
 }
 
 } // anonymous namespace
@@ -162,7 +437,7 @@ void Pipeline::workerThread(std::string drivePath) {
         setState(PipelineState::FetchingMetadata);
 
         std::string discId = metadata::DiscId::calculate(toc);
-        mbResult = metadata::MusicBrainz::lookup(discId);
+        mbResult = metadata::MusicBrainz::lookup(discId, toc);
 
         if (mbResult.ok && !mbResult.releases.empty()) {
             if (m_config.autoSelectRelease) {
@@ -180,6 +455,35 @@ void Pipeline::workerThread(std::string drivePath) {
         // If lookup failed or no releases, selectedRelease stays -1 (tag-less rip)
     }
 
+    if (selectedRelease < 0 && m_config.useManualMetadata &&
+        !m_config.manualRelease.tracks.empty()) {
+        mbResult.ok = true;
+        mbResult.error.clear();
+        mbResult.releases.clear();
+        mbResult.releases.push_back(m_config.manualRelease);
+        selectedRelease = 0;
+    }
+
+    const int totalAudio = toc.audioTrackCount();
+    const bool isFlac    = (m_config.format == encode::Format::FLAC);
+    const char* ext      = isFlac ? "flac" : "wav";
+
+    // Collect track titles for filename generation (from MB if available)
+    const metadata::MbRelease* release = nullptr;
+    if (selectedRelease >= 0 && selectedRelease < static_cast<int>(mbResult.releases.size()))
+        release = &mbResult.releases[static_cast<size_t>(selectedRelease)];
+
+    m_config.outputDir = nextAvailableFolder(
+        m_config.outputDir,
+        releaseFolderName(release, m_config.format));
+    ec.clear();
+    std::filesystem::create_directories(m_config.outputDir, ec);
+    if (ec) {
+        setState(PipelineState::Error);
+        if (m_cb.onError) m_cb.onError("Cannot create album output folder: " + ec.message());
+        return;
+    }
+
     if (m_cancelled) { setState(PipelineState::Cancelled); if (m_cb.onCancelled) m_cb.onCancelled(); return; }
 
     // ------------------------------------------------------------------
@@ -192,8 +496,22 @@ void Pipeline::workerThread(std::string drivePath) {
         const std::string& releaseId = mbResult.releases[
             static_cast<size_t>(selectedRelease)].id;
         coverArt = metadata::CoverArt::fetchFront(releaseId);
-        if (!coverArt.ok && m_cb.onError)
+        if (coverArt.ok) {
+            const char* coverExt = coverArt.mimeType == "image/png" ? "png" : "jpg";
+            const std::filesystem::path coverPath =
+                m_config.outputDir / (std::string("cover.") + coverExt);
+
+            std::ofstream coverFile(coverPath, std::ios::binary);
+            if (coverFile) {
+                coverFile.write(
+                    reinterpret_cast<const char*>(coverArt.data.data()),
+                    static_cast<std::streamsize>(coverArt.data.size()));
+            } else if (m_cb.onError) {
+                m_cb.onError("Cover art: could not write " + coverPath.string());
+            }
+        } else if (m_cb.onError) {
             m_cb.onError("Cover art: " + coverArt.error);  // non-fatal
+        }
     }
 
     // ------------------------------------------------------------------
@@ -209,19 +527,12 @@ void Pipeline::workerThread(std::string drivePath) {
     }
     engine.probeCapabilities();
 
-    const int totalAudio = toc.audioTrackCount();
-    const bool isFlac    = (m_config.format == encode::Format::FLAC);
-    const char* ext      = isFlac ? "flac" : "wav";
-
-    // Collect track titles for filename generation (from MB if available)
-    const metadata::MbRelease* release = nullptr;
-    if (selectedRelease >= 0 && selectedRelease < static_cast<int>(mbResult.releases.size()))
-        release = &mbResult.releases[static_cast<size_t>(selectedRelease)];
-
-    std::vector<std::vector<uint8_t>> allTrackPcm;   // for AccurateRip
+    std::vector<std::vector<uint8_t>> allTrackPcm;    // for AccurateRip
     std::vector<std::filesystem::path> writtenFiles;  // for tagging
+    std::vector<TrackDoneInfo> trackDone;             // for rip log/upload helper
     allTrackPcm.reserve(static_cast<size_t>(totalAudio));
     writtenFiles.reserve(static_cast<size_t>(totalAudio));
+    trackDone.reserve(static_cast<size_t>(totalAudio));
 
     // ------------------------------------------------------------------
     // 5.  Rip loop
@@ -249,6 +560,13 @@ void Pipeline::workerThread(std::string drivePath) {
             writtenFiles.push_back({});
             ++audioIdx;
             break;
+        }
+
+        // Surface SCSI / hardware errors immediately rather than silently encoding silence
+        if (!result.ok && !result.error.empty() && m_cb.onError) {
+            m_cb.onError(result.error);
+            setState(PipelineState::Error);
+            return;
         }
 
         int suspectSectors = 0, c2Sectors = 0;
@@ -324,6 +642,7 @@ void Pipeline::workerThread(std::string drivePath) {
         info.outputPath     = writeOk ? filePath : std::filesystem::path{};
         info.ok             = result.ok && writeOk;
         if (m_cb.onTrackDone) m_cb.onTrackDone(info);
+        trackDone.push_back(info);
 
         allTrackPcm.push_back(writeOk ? std::move(result.data) : std::vector<uint8_t>{});
         writtenFiles.push_back(writeOk ? filePath : std::filesystem::path{});
@@ -431,9 +750,15 @@ void Pipeline::workerThread(std::string drivePath) {
     // ------------------------------------------------------------------
     // 6.  AccurateRip verification
     // ------------------------------------------------------------------
+    verify::ArDiscResult arResult;
+    bool arResultAvailable = false;
+    verify::ArOffsetResult offsetResult;
+    bool offsetResultAvailable = false;
+
     if (m_config.verifyAccurateRip && static_cast<int>(allTrackPcm.size()) == totalAudio) {
         setState(PipelineState::Verifying);
-        auto arResult = verify::AccurateRip::verify(toc, allTrackPcm);
+        arResult = verify::AccurateRip::verify(toc, allTrackPcm);
+        arResultAvailable = true;
         if (m_cb.onVerifyDone) m_cb.onVerifyDone(arResult);
 
         // ------------------------------------------------------------------
@@ -448,7 +773,8 @@ void Pipeline::workerThread(std::string drivePath) {
             }();
 
             if (!anyMatched && arResult.lookupOk) {
-                auto offsetResult = verify::AccurateRip::detectOffset(toc, allTrackPcm);
+                offsetResult = verify::AccurateRip::detectOffset(toc, allTrackPcm);
+                offsetResultAvailable = true;
                 if (m_cb.onOffsetDetected) m_cb.onOffsetDetected(offsetResult);
             }
         }
@@ -512,6 +838,7 @@ void Pipeline::workerThread(std::string drivePath) {
     // ------------------------------------------------------------------
     // 8.  Cue sheet (optional)
     // ------------------------------------------------------------------
+    bool cueWritten = false;
     if (m_config.writeCueSheet) {
         const std::string discId = metadata::DiscId::calculate(toc);
 
@@ -530,8 +857,40 @@ void Pipeline::workerThread(std::string drivePath) {
         const std::filesystem::path cuePath = m_config.outputDir / cueName;
 
         std::string cueErr;
-        if (!metadata::CueSheet::write(cuePath, cueContent, &cueErr) && m_cb.onError)
+        if (metadata::CueSheet::write(cuePath, cueContent, &cueErr)) {
+            cueWritten = true;
+        } else if (m_cb.onError) {
             m_cb.onError("Cue sheet: " + cueErr);  // non-fatal
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 8b. Tracker proof/helper sidecars (optional)
+    // ------------------------------------------------------------------
+    if (m_config.writeRipLog) {
+        writeRipLog(
+            m_config.outputDir / "AtomicRipper.log",
+            drivePath,
+            m_config,
+            toc,
+            release,
+            trackDone,
+            writtenFiles,
+            arResultAvailable ? &arResult : nullptr,
+            offsetResultAvailable ? &offsetResult : nullptr,
+            cueWritten);
+    }
+
+    if (m_config.writeUploadInfo) {
+        writeUploadInfo(
+            m_config.outputDir / "upload-info.txt",
+            m_config,
+            toc,
+            release,
+            trackDone,
+            arResultAvailable ? &arResult : nullptr,
+            cueWritten,
+            coverArt.ok);
     }
 
     // ------------------------------------------------------------------
@@ -541,6 +900,43 @@ void Pipeline::workerThread(std::string drivePath) {
         drive::Drive drv(drivePath, drivePath);
         drv.eject();   // best-effort; ignore failure
     }
+
+    // ------------------------------------------------------------------
+    // 11. B2 upload (optional) — send rip to the AtomicBlast B2 bucket
+    // ------------------------------------------------------------------
+    // Runs after tagging so the files on disk have their final names.
+    // Cover art (already embedded in the FLAC) is also uploaded as cover.jpg
+    // so AtomicBlast can display it when browsing the library.
+    //
+    // TO ENABLE: see the instructions in pipeline/Pipeline.hpp and
+    //            core/upload/B2Uploader.hpp.
+    /*
+    if (m_config.uploadToB2 && !writtenFiles.empty()) {
+        const std::string artist = release ? release->artist : "Unknown Artist";
+        const std::string album  = release ? release->title  : "Unknown Album";
+
+        auto progressFn = [this](const std::string& b2Path, int idx, int total) {
+            if (m_cb.onUploadProgress) m_cb.onUploadProgress(b2Path, idx, total);
+        };
+
+        auto upResult = upload::B2Uploader::upload(
+            m_config.b2Config,
+            artist,
+            album,
+            writtenFiles,
+            coverArt.ok ? coverArt.data     : std::vector<uint8_t>{},
+            coverArt.ok ? coverArt.mimeType : "",
+            progressFn
+        );
+
+        if (m_cb.onUploadDone) m_cb.onUploadDone(upResult);
+
+        if (!upResult.ok && m_cb.onError)
+            m_cb.onError("B2 upload failed: " + upResult.error);
+            // Note: this is non-fatal — the rip completed successfully even if
+            // the upload failed. The files are still on disk in outputDir.
+    }
+    */
 
     // ------------------------------------------------------------------
     // 10. Done

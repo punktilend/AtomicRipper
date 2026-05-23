@@ -123,6 +123,12 @@ static std::string mbBase64(const uint8_t* src, size_t len) {
     return out;
 }
 
+static void writeHex(char* dst, size_t width, uint32_t value) {
+    char tmp[16];
+    snprintf(tmp, sizeof(tmp), "%0*X", static_cast<int>(width), value);
+    memcpy(dst, tmp, width);
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -138,21 +144,18 @@ std::string DiscId::calculate(const drive::TOC& toc) {
     //   [2..3]   last  track (2 uppercase hex chars)
     //   [4..11]  lead-out offset in sectors + 150 (8 uppercase hex chars)
     //   [12..819] tracks 1–99 offsets, each 8 uppercase hex chars, zero-padded
-    char buf[805];  // 804 chars + null terminator for snprintf safety
+    char buf[804];
     memset(buf, '0', 804);
-    buf[804] = '\0';
 
-    snprintf(buf + 0, 3, "%02X", toc.firstTrack);
-    snprintf(buf + 2, 3, "%02X", toc.lastTrack);
-    snprintf(buf + 4, 9, "%08X", toc.leadOutLBA + 150);
+    writeHex(buf + 0, 2, static_cast<uint32_t>(toc.firstTrack));
+    writeHex(buf + 2, 2, static_cast<uint32_t>(toc.lastTrack));
+    writeHex(buf + 4, 8, toc.leadOutLBA + 150);
 
     for (const auto& t : toc.tracks) {
         if (t.number < 1 || t.number > 99) continue;
         // Slot for track N starts at offset 4 + N*8
-        snprintf(buf + 4 + t.number * 8, 9, "%08X", t.lba + 150);
+        writeHex(buf + 4 + t.number * 8, 8, t.lba + 150);
     }
-    // Restore the null byte that snprintf may have advanced past position 803
-    buf[804] = '\0';
 
     Sha1Ctx ctx;
     sha1Init(ctx);

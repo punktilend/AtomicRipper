@@ -6,6 +6,13 @@ Secure multi-pass ripping, AccurateRip verification, MusicBrainz metadata, FLAC/
 
 ---
 
+## Download
+
+- [Windows Store/MSIX package](https://github.com/punktilend/AtomicRipper/releases/download/v0.7.3.0/AtomicRipper_0.7.3.0_x64.msix)
+- [Windows Store packaging files](windows-store/)
+
+---
+
 ## Features
 
 | Feature | Status |

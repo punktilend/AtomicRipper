@@ -12,6 +12,7 @@ static_assert(sizeof(HANDLE) == sizeof(void*),
 #endif
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 
@@ -22,21 +23,20 @@ namespace atomicripper::rip {
 // ---------------------------------------------------------------------------
 namespace {
 
-uint32_t crc32Table[256];
-bool     crc32TableReady = false;
-
-void buildCRC32Table() {
-    for (uint32_t i = 0; i < 256; ++i) {
+constexpr std::array<uint32_t, 256> buildCRC32Table() {
+    std::array<uint32_t, 256> table{};
+    for (uint32_t i = 0; i < table.size(); ++i) {
         uint32_t c = i;
         for (int j = 0; j < 8; ++j)
             c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-        crc32Table[i] = c;
+        table[i] = c;
     }
-    crc32TableReady = true;
+    return table;
 }
 
+constexpr auto crc32Table = buildCRC32Table();
+
 uint32_t computeCRC32(const uint8_t* data, size_t len) {
-    if (!crc32TableReady) buildCRC32Table();
     uint32_t crc = 0xFFFFFFFFu;
     for (size_t i = 0; i < len; ++i)
         crc = crc32Table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
@@ -70,9 +70,10 @@ bool RipEngine::open() {
     std::wstring devicePath = L"\\\\.\\" +
         std::wstring(m_drivePath.begin(), m_drivePath.end());
 
+    // IOCTL_SCSI_PASS_THROUGH_DIRECT requires both read and write access.
     HANDLE h = CreateFileW(
         devicePath.c_str(),
-        GENERIC_READ,
+        GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr,
         OPEN_EXISTING,
@@ -162,7 +163,15 @@ bool RipEngine::readSectors(uint32_t lba, int count, uint8_t* outBuf, bool withC
         nullptr
     );
 
-    return ok && buf.spt.ScsiStatus == 0;
+    if (!ok) {
+        m_lastWinError = GetLastError();
+        return false;
+    }
+    if (buf.spt.ScsiStatus != 0) {
+        m_lastScsiStatus = buf.spt.ScsiStatus;
+        return false;
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +202,7 @@ SectorResult RipEngine::ripSectorBurst(uint32_t lba) {
     result.lba         = lba;
     result.confidence  = 0;
     result.hasC2Errors = false;
+    result.ioError     = false;
     result.retries     = 0;
     result.data.resize(2352, 0);
 
@@ -208,6 +218,8 @@ SectorResult RipEngine::ripSectorBurst(uint32_t lba) {
                 if (buf[i] != 0) { result.hasC2Errors = true; break; }
             }
         }
+    } else {
+        result.ioError = true;
     }
 
     return result;
@@ -222,6 +234,7 @@ SectorResult RipEngine::ripSectorSecure(uint32_t lba) {
     result.lba         = lba;
     result.confidence  = 0;
     result.hasC2Errors = false;
+    result.ioError     = false;
     result.retries     = 0;
     result.data.assign(2352, 0);
 
@@ -232,8 +245,9 @@ SectorResult RipEngine::ripSectorSecure(uint32_t lba) {
     std::vector<std::vector<uint8_t>> reads;
     reads.reserve(static_cast<size_t>(m_settings.minMatches + m_settings.maxRetries));
 
+    std::vector<uint8_t> buf(static_cast<size_t>(bytesPerRead));
     auto doRead = [&]() -> bool {
-        std::vector<uint8_t> buf(bytesPerRead, 0);
+        std::fill(buf.begin(), buf.end(), uint8_t{0});
         if (!readSectors(lba, 1, buf.data(), useC2))
             return false;
 
@@ -241,10 +255,10 @@ SectorResult RipEngine::ripSectorSecure(uint32_t lba) {
             for (int i = 2352; i < 2646; ++i) {
                 if (buf[i] != 0) { result.hasC2Errors = true; break; }
             }
-            buf.resize(2352);  // keep only audio bytes
+            reads.emplace_back(buf.begin(), buf.begin() + 2352);
+        } else {
+            reads.push_back(buf);
         }
-
-        reads.push_back(std::move(buf));
         return true;
     };
 
@@ -297,6 +311,8 @@ SectorResult RipEngine::ripSectorSecure(uint32_t lba) {
     // Could not reach consensus — take the most common read anyway (best effort)
     if (!reads.empty()) {
         result.data = reads[0];
+    } else {
+        result.ioError = true;  // every SCSI read attempt failed (hardware/permission error)
     }
     result.confidence = 0;  // signal to caller that this sector is suspect
     return result;
@@ -336,12 +352,12 @@ TrackRipResult RipEngine::ripTrack(const drive::TrackInfo& track,
     result.sectors.reserve(trackSectorCount);
 
     // Raw buffer: all sectors read (includes extra for offset correction)
-    std::vector<uint8_t> rawBuf;
-    rawBuf.reserve(static_cast<size_t>(readCount) * 2352);
+    std::vector<uint8_t> rawBuf(static_cast<size_t>(readCount) * 2352, uint8_t{0});
 
     auto    startTime    = std::chrono::steady_clock::now();
     int     totalRetries = 0;
     uint32_t trackSectorsProcessed = 0;
+    int      ioErrorCount = 0;  // consecutive IO errors at the start of the read
 
     // Sector index window: which reads correspond to actual track sectors
     const uint32_t trackSectorStart = (byteOffset < 0)
@@ -365,14 +381,36 @@ TrackRipResult RipEngine::ripTrack(const drive::TrackInfo& track,
 
         totalRetries += sr.retries;
 
-        // Append audio bytes to raw buffer (zero-fill on read failure)
-        if (sr.data.size() == 2352)
-            rawBuf.insert(rawBuf.end(), sr.data.begin(), sr.data.end());
-        else
-            rawBuf.insert(rawBuf.end(), 2352, uint8_t{0});
+        // Early abort: if the first several sectors all fail at the SCSI level, something
+        // is wrong beyond disc quality (likely missing Administrator privileges).
+        // Abort immediately rather than silently encoding silence.
+        if (sr.ioError) {
+            ++ioErrorCount;
+            if (ioErrorCount == 10) {
+                result.ok    = false;
+                result.error = "SCSI reads failed for 10 consecutive sectors"
+                               " (WinErr=" + std::to_string(m_lastWinError) +
+                               " ScsiStatus=" + std::to_string(m_lastScsiStatus) + ")"
+                               " — check that the disc is inserted and the drive supports raw reading";
+                return result;
+            }
+        } else {
+            ioErrorCount = 0;
+        }
+
+        // Copy audio bytes to the pre-sized raw buffer (left as zeroes on read failure).
+        if (sr.data.size() == 2352) {
+            std::memcpy(rawBuf.data() + static_cast<size_t>(i) * 2352,
+                        sr.data.data(),
+                        2352);
+        }
 
         // Record quality info only for actual track sectors
         if (i >= trackSectorStart && i < trackSectorEnd) {
+            // TrackRipResult::data carries the audio. The per-sector list is
+            // quality metadata, so avoid storing another full copy per sector.
+            sr.data.clear();
+            sr.data.shrink_to_fit();
             result.sectors.push_back(std::move(sr));
             ++trackSectorsProcessed;
         }

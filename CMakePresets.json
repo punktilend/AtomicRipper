@@ -14,7 +14,7 @@
         "CMAKE_PREFIX_PATH": "C:/Qt/6.10.1/msvc2022_64"
       },
       "environment": {
-        "VCPKG_VISUAL_STUDIO_PATH": "C:/Program Files/Microsoft Visual Studio/2022/Community"
+        "VCPKG_VISUAL_STUDIO_PATH": "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools"
       }
     },
     {

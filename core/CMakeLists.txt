@@ -9,6 +9,7 @@ add_library(atomicripper-core STATIC
     drive/DriveEnumerator.cpp
     metadata/DiscId.cpp
     metadata/MusicBrainz.cpp
+    metadata/CueToolsDB.cpp
     metadata/TagWriter.cpp
     metadata/CoverArt.cpp
     metadata/CueSheet.cpp
@@ -17,6 +18,7 @@ add_library(atomicripper-core STATIC
     encode/WavEncoder.cpp
     verify/AccurateRip.cpp
     pipeline/Pipeline.cpp
+    # upload/B2Uploader.cpp   # uncomment to enable B2 upload support (see core/upload/B2Uploader.hpp)
 )
 
 target_include_directories(atomicripper-core PUBLIC

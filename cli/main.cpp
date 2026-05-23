@@ -8,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <algorithm>
 
 using namespace atomicripper;
 
@@ -57,7 +58,9 @@ static int doRip(const std::string& drivePath,
                  int                driveOffset,
                  bool               detectOffset = false,
                  bool               eject        = false,
-                 bool               singleFile   = false) {
+                 bool               singleFile   = false,
+                 rip::RipMode       ripMode      = rip::RipMode::Secure,
+                 int                compression  = 8) {
     std::filesystem::path outPath = outputDir.empty()
         ? std::filesystem::current_path()
         : std::filesystem::path(outputDir);
@@ -66,12 +69,12 @@ static int doRip(const std::string& drivePath,
     pipeline::PipelineConfig cfg;
     cfg.outputDir                        = outPath;
     cfg.format                           = format;
-    cfg.ripSettings.mode                 = rip::RipMode::Secure;
+    cfg.ripSettings.mode                 = ripMode;
     cfg.ripSettings.maxRetries           = 16;
     cfg.ripSettings.minMatches           = 2;
     cfg.ripSettings.useC2Errors          = true;
     cfg.ripSettings.driveOffset          = driveOffset;
-    cfg.encoderSettings.compressionLevel = 8;
+    cfg.encoderSettings.compressionLevel = std::clamp(compression, 0, 8);
     cfg.fetchMetadata                    = true;
     cfg.embedCoverArt                    = (format == encode::Format::FLAC);
     cfg.verifyAccurateRip                = true;
@@ -97,6 +100,9 @@ static int doRip(const std::string& drivePath,
         printf("Drive  : %s\n", drivePath.c_str());
         printf("Disc   : %d tracks, %.0f sec\n", totalAudioTracks, toc.durationSeconds());
         printf("Format : %s\n", fmtName);
+        printf("Mode   : %s\n", ripMode == rip::RipMode::Burst ? "Burst" : "Secure");
+        if (format == encode::Format::FLAC)
+            printf("FLAC   : compression %d\n", std::clamp(compression, 0, 8));
         if (driveOffset != 0) printf("Offset : %+d samples\n", driveOffset);
         printf("Output : %s\n\n", outPath.string().c_str());
     };
@@ -230,6 +236,8 @@ static void printUsage(const char* prog) {
     printf("  --toc <drive>                       Read and display TOC (e.g. D:)\n");
     printf("  --rip <drive> [outdir]              Rip all audio tracks to FLAC\n");
     printf("  --rip <drive> [outdir] --wav        Rip to WAV instead\n");
+    printf("  --rip <drive> [outdir] --burst      Faster single-pass rip (less secure)\n");
+    printf("  --rip <drive> [outdir] --compression N  FLAC compression 0-8\n");
     printf("  --rip <drive> [outdir] --offset N   Set drive read offset in samples\n");
     printf("  --rip <drive> [outdir] --detect-offset  Auto-detect offset via AccurateRip\n");
     printf("  --rip <drive> [outdir] --eject          Eject disc when rip completes\n");
@@ -275,12 +283,20 @@ int main(int argc, char* argv[]) {
         bool           detectOff    = false;
         bool           ejectAfter   = false;
         bool           singleFile   = false;
+        rip::RipMode   ripMode      = rip::RipMode::Secure;
+        int            compression  = 8;
 
         for (int i = 3; i < argc; ++i) {
             if      (strcmp(argv[i], "--wav") == 0)
                 fmt = encode::Format::WAV;
+            else if (strcmp(argv[i], "--burst") == 0)
+                ripMode = rip::RipMode::Burst;
+            else if (strcmp(argv[i], "--secure") == 0)
+                ripMode = rip::RipMode::Secure;
             else if (strcmp(argv[i], "--single-file") == 0)
                 singleFile = true;
+            else if (strcmp(argv[i], "--compression") == 0 && i + 1 < argc)
+                compression = std::clamp(std::atoi(argv[++i]), 0, 8);
             else if (strcmp(argv[i], "--offset") == 0 && i + 1 < argc)
                 offset = std::atoi(argv[++i]);
             else if (strcmp(argv[i], "--detect-offset") == 0)
@@ -290,7 +306,8 @@ int main(int argc, char* argv[]) {
             else if (outDir.empty())
                 outDir = argv[i];
         }
-        return doRip(path, outDir, fmt, offset, detectOff, ejectAfter, singleFile);
+        return doRip(path, outDir, fmt, offset, detectOff, ejectAfter, singleFile,
+                     ripMode, compression);
     }
 
     printUsage(argv[0]); return 1;

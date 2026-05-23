@@ -6,6 +6,8 @@
 #include <QString>
 #include <QTableWidgetItem>
 
+#include <utility>
+
 namespace atomicripper::gui {
 
 // ---------------------------------------------------------------------------
@@ -16,19 +18,28 @@ TrackTableWidget::TrackTableWidget(QWidget* parent)
     : QTableWidget(parent)
 {
     setColumnCount(ColCount);
-    setHorizontalHeaderLabels({ "#", "Title", "Duration", "Status", "CRC32", "AR", "C2" });
+    setHorizontalHeaderLabels({
+        "#", "Title", "Artist", "Start", "Length", "Gap", "Size",
+        "Compr. Size", "Pre-Emphasis", "Status", "CRC32", "AR", "C2"
+    });
 
-    horizontalHeader()->setSectionResizeMode(Number,   QHeaderView::ResizeToContents);
-    horizontalHeader()->setSectionResizeMode(Title,    QHeaderView::Stretch);
-    horizontalHeader()->setSectionResizeMode(Duration, QHeaderView::ResizeToContents);
-    horizontalHeader()->setSectionResizeMode(Status,   QHeaderView::ResizeToContents);
-    horizontalHeader()->setSectionResizeMode(Crc32,    QHeaderView::ResizeToContents);
-    horizontalHeader()->setSectionResizeMode(Ar,       QHeaderView::ResizeToContents);
-    horizontalHeader()->setSectionResizeMode(C2,       QHeaderView::ResizeToContents);
+    horizontalHeader()->setSectionResizeMode(Number,         QHeaderView::ResizeToContents);
+    horizontalHeader()->setSectionResizeMode(Title,          QHeaderView::Stretch);
+    horizontalHeader()->setSectionResizeMode(Artist,         QHeaderView::Stretch);
+    horizontalHeader()->setSectionResizeMode(Start,          QHeaderView::ResizeToContents);
+    horizontalHeader()->setSectionResizeMode(Duration,       QHeaderView::ResizeToContents);
+    horizontalHeader()->setSectionResizeMode(Gap,            QHeaderView::ResizeToContents);
+    horizontalHeader()->setSectionResizeMode(Size,           QHeaderView::ResizeToContents);
+    horizontalHeader()->setSectionResizeMode(CompressedSize, QHeaderView::ResizeToContents);
+    horizontalHeader()->setSectionResizeMode(PreEmphasis,    QHeaderView::ResizeToContents);
+    horizontalHeader()->setSectionResizeMode(Status,         QHeaderView::ResizeToContents);
+    horizontalHeader()->setSectionResizeMode(Crc32,          QHeaderView::ResizeToContents);
+    horizontalHeader()->setSectionResizeMode(Ar,             QHeaderView::ResizeToContents);
+    horizontalHeader()->setSectionResizeMode(C2,             QHeaderView::ResizeToContents);
 
     verticalHeader()->setVisible(false);
     setSelectionBehavior(QAbstractItemView::SelectRows);
-    setEditTriggers(QAbstractItemView::NoEditTriggers);
+    setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
     setAlternatingRowColors(true);
 }
 
@@ -43,6 +54,31 @@ static QTableWidgetItem* makeItem(const QString& text,
     return item;
 }
 
+static QString lbaToMsf(uint32_t lba) {
+    const uint32_t frames  = lba % 75;
+    const uint32_t seconds = (lba / 75) % 60;
+    const uint32_t minutes = lba / (75 * 60);
+    return QString::asprintf("%02u:%02u:%02u", minutes, seconds, frames);
+}
+
+static QString sectorsToTime(uint32_t sectors) {
+    return lbaToMsf(sectors);
+}
+
+static QString bytesToMb(uint64_t bytes) {
+    return QString("%1 MB").arg(static_cast<double>(bytes) / (1024.0 * 1024.0), 0, 'f', 2);
+}
+
+static void setEditable(QTableWidgetItem* item, bool editable) {
+    if (!item) return;
+    Qt::ItemFlags flags = item->flags();
+    if (editable)
+        flags |= Qt::ItemIsEditable;
+    else
+        flags &= ~Qt::ItemIsEditable;
+    item->setFlags(flags);
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -50,6 +86,14 @@ static QTableWidgetItem* makeItem(const QString& text,
 void TrackTableWidget::reset() {
     setRowCount(0);
     m_trackRow.clear();
+}
+
+void TrackTableWidget::setMetadataEditingEnabled(bool enabled) {
+    m_metadataEditingEnabled = enabled;
+    for (int row = 0; row < rowCount(); ++row) {
+        setEditable(item(row, Title), enabled);
+        setEditable(item(row, Artist), enabled);
+    }
 }
 
 void TrackTableWidget::populateFromToc(const drive::TOC&            toc,
@@ -66,19 +110,30 @@ void TrackTableWidget::populateFromToc(const drive::TOC&            toc,
         // # column
         setItem(row, Number, makeItem(QString::number(track.number)));
 
-        // Title — from MB if available
-        QString title;
-        if (release && audioIdx < static_cast<int>(release->tracks.size()))
-            title = QString::fromStdString(
-                release->tracks[static_cast<size_t>(audioIdx)].title);
-        setItem(row, Title, makeItem(title, Qt::AlignLeft | Qt::AlignVCenter));
+        QString title = QString("Track%1").arg(track.number, 2, 10, QChar('0'));
+        QString artist = release ? QString::fromStdString(release->artist) : QString("Unknown Artist");
+        if (release && audioIdx < static_cast<int>(release->tracks.size())) {
+            const auto& mbTrack = release->tracks[static_cast<size_t>(audioIdx)];
+            if (!mbTrack.title.empty())
+                title = QString::fromStdString(mbTrack.title);
+            if (!mbTrack.artist.empty())
+                artist = QString::fromStdString(mbTrack.artist);
+        }
+        auto* titleItem = makeItem(title, Qt::AlignLeft | Qt::AlignVCenter);
+        auto* artistItem = makeItem(artist, Qt::AlignLeft | Qt::AlignVCenter);
+        setEditable(titleItem, m_metadataEditingEnabled);
+        setEditable(artistItem, m_metadataEditingEnabled);
+        setItem(row, Title, titleItem);
+        setItem(row, Artist, artistItem);
 
         // Duration from sector count
-        const double secs = static_cast<double>(track.sectorCount) / 75.0;
-        const int m = static_cast<int>(secs) / 60;
-        const int s = static_cast<int>(secs) % 60;
-        setItem(row, Duration,
-                makeItem(QString::asprintf("%d:%02d", m, s)));
+        setItem(row, Start, makeItem(lbaToMsf(track.lba)));
+        setItem(row, Duration, makeItem(sectorsToTime(track.sectorCount)));
+        setItem(row, Gap, makeItem("Unknown"));
+        setItem(row, Size, makeItem(bytesToMb(static_cast<uint64_t>(track.sectorCount) * 2352u)));
+        setItem(row, CompressedSize, makeItem(bytesToMb(
+            static_cast<uint64_t>(static_cast<double>(track.sectorCount) * 2352.0 * 0.56))));
+        setItem(row, PreEmphasis, makeItem("No"));
 
         // Remaining columns — blank until the rip fills them in
         setItem(row, Status, makeItem("—"));
@@ -88,6 +143,49 @@ void TrackTableWidget::populateFromToc(const drive::TOC&            toc,
 
         ++audioIdx;
     }
+}
+
+metadata::MbRelease TrackTableWidget::buildReleaseFromRows(
+    const drive::TOC& toc,
+    const metadata::MbRelease& album) const
+{
+    metadata::MbRelease release = album;
+    release.tracks.clear();
+
+    int audioIdx = 0;
+    for (const auto& track : toc.tracks) {
+        if (!track.isAudio) continue;
+
+        metadata::MbTrack mbTrack;
+        mbTrack.number = track.number;
+        mbTrack.title = QString("Track%1").arg(track.number, 2, 10, QChar('0')).toStdString();
+        mbTrack.artist = release.artist;
+        mbTrack.lengthMs = static_cast<int>(
+            (static_cast<uint64_t>(track.sectorCount) * 1000u) / 75u);
+
+        if (m_trackRow.contains(track.number)) {
+            const int row = m_trackRow.value(track.number);
+            if (auto* titleItem = item(row, Title)) {
+                const QString title = titleItem->text().trimmed();
+                if (!title.isEmpty())
+                    mbTrack.title = title.toStdString();
+            }
+            if (auto* artistItem = item(row, Artist)) {
+                const QString artist = artistItem->text().trimmed();
+                if (!artist.isEmpty())
+                    mbTrack.artist = artist.toStdString();
+            }
+        }
+
+        if (mbTrack.artist.empty())
+            mbTrack.artist = release.artist.empty() ? "Unknown Artist" : release.artist;
+
+        release.tracks.push_back(std::move(mbTrack));
+        ++audioIdx;
+    }
+
+    (void)audioIdx;
+    return release;
 }
 
 void TrackTableWidget::setActiveTrack(int trackNumber) {

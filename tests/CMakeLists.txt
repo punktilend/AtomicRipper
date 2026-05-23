@@ -14,6 +14,4 @@ target_include_directories(atomicripper-tests PRIVATE
     ${CMAKE_SOURCE_DIR}
 )
 
-include(CTest)
-include(Catch)
-catch_discover_tests(atomicripper-tests)
+add_test(NAME atomicripper-tests COMMAND atomicripper-tests)

@@ -17,6 +17,8 @@ find_package(cpr CONFIG REQUIRED)
 find_package(FLAC CONFIG REQUIRED)
 find_package(taglib CONFIG REQUIRED)
 
+enable_testing()
+
 add_subdirectory(core)
 add_subdirectory(cli)
 add_subdirectory(tests)
