@@ -2,14 +2,23 @@
 
 A modern, open-source CD ripper for Windows — built to replace EAC.
 
-Secure multi-pass ripping, AccurateRip verification, MusicBrainz metadata, FLAC/WAV output, cover art, cue sheets. Pure C++20, no legacy cruft.
+Secure multi-pass ripping, AccurateRip verification, MusicBrainz metadata, FLAC/WAV output, cover art, cue sheets. Qt 6 GUI. Pure C++20, no legacy cruft.
 
 ---
 
 ## Download
 
-- [Windows Store/MSIX package](https://github.com/punktilend/AtomicRipper/releases/download/v0.7.3.0/AtomicRipper_0.7.3.0_x64.msix)
-- [Windows Store packaging files](windows-store/)
+| Method | Link |
+|---|---|
+| **Microsoft Store** | [Install from the Windows Store](https://apps.microsoft.com/store/detail/atomicripper/9PGK8SSMHNH3) |
+| **GitHub Releases** | [AtomicRipper_0.7.4.0_x64.msix](https://github.com/punktilend/AtomicRipper/releases/download/v0.7.4.0/AtomicRipper_0.7.4.0_x64.msix) |
+
+> **Requirements:** Windows 10 x64 or later. No additional runtimes needed — everything is bundled.
+
+To install the MSIX outside the Store, right-click it and choose **Install**, or run:
+```powershell
+Add-AppxPackage .\AtomicRipper_0.7.4.0_x64.msix
+```
 
 ---
 
@@ -30,13 +39,14 @@ Secure multi-pass ripping, AccurateRip verification, MusicBrainz metadata, FLAC/
 | Cue sheet generation (.cue, CRLF, per-track and single-file) | ✅ |
 | Single-file FLAC with embedded CUESHEET block | ✅ |
 | Disc eject on completion | ✅ |
-| Qt 6 GUI | 🔜 |
+| Qt 6 GUI | ✅ |
 | Re-rip suspect sectors | 🔜 |
+| Backblaze B2 upload | 🔜 |
 | Linux / macOS support | 🔜 |
 
 ---
 
-## Requirements
+## Requirements (building from source)
 
 - Windows 10 or later (x64)
 - [Visual Studio 2022 Community](https://visualstudio.microsoft.com/vs/community/) with the **Desktop development with C++** workload
@@ -59,8 +69,9 @@ cmake --preset windows-msvc-x64
 cmake --build build --config Release
 
 # Output:
-#   build\bin\Release\atomicripper.exe
-#   build\bin\Release\atomicripper-tests.exe
+#   build\bin\Release\AtomicRipper-gui.exe   <- GUI
+#   build\bin\Release\atomicripper.exe       <- CLI
+#   build\bin\Release\atomicripper-tests.exe <- Tests
 ```
 
 Dependencies installed automatically via vcpkg manifest (`vcpkg.json`):
@@ -68,7 +79,15 @@ Dependencies installed automatically via vcpkg manifest (`vcpkg.json`):
 
 ---
 
-## Usage
+## GUI
+
+Launch `AtomicRipper-gui.exe`. Insert a disc, select your output folder and format, and click **Start**.
+
+The GUI handles everything the CLI does — drive selection, MusicBrainz lookup, release picker, per-track progress, AccurateRip verification results, and offset detection.
+
+---
+
+## CLI Usage
 
 ```
 atomicripper.exe [options]
@@ -92,7 +111,7 @@ atomicripper.exe [options]
 ```
 > atomicripper.exe --rip D: "C:\Music\PinkFloyd\DSOTM"
 
-AtomicRipper v0.7.0
+AtomicRipper v0.7.4
 ===================
 
 Drive  : D:
@@ -138,7 +157,7 @@ Done.
 
 **Offset detection** — if no tracks match at offset 0, AtomicRipper can sweep ±1176 samples (the maximum standard drive offset) using an O(N+K) sliding-window algorithm to find your drive's read offset automatically.
 
-**Pipeline** — the full rip/encode/verify/tag sequence runs in a background thread. The `Pipeline` class exposes typed callbacks so that any UI (CLI today, Qt tomorrow) can observe every state transition without polling.
+**Pipeline** — the full rip/encode/verify/tag sequence runs in a background thread. The `Pipeline` class exposes typed callbacks so the GUI and CLI can observe every state transition without polling.
 
 ---
 
@@ -152,7 +171,9 @@ AtomicRipper/
 │   ├── encode/         # FlacEncoder, WavEncoder, IEncoder interface
 │   ├── metadata/       # DiscId, MusicBrainz, TagWriter, CoverArt, CueSheet
 │   ├── verify/         # AccurateRip checksums, HTTP fetch, offset detection
-│   └── pipeline/       # Pipeline — async orchestration of all the above
+│   ├── pipeline/       # Pipeline — async orchestration of all the above
+│   └── upload/         # B2Uploader — built but disabled (see Roadmap)
+├── gui/                # Qt 6 GUI front-end
 ├── cli/                # Console front-end (main.cpp)
 ├── tests/              # Catch2 unit tests (29 tests, all passing)
 └── CMakeLists.txt
@@ -178,7 +199,7 @@ Tests cover: TOC validity, MusicBrainz Disc ID calculation, AccurateRip checksum
 ## Roadmap
 
 - [ ] **Re-rip suspect sectors** — targeted retry of sectors that couldn't reach read consensus
-- [ ] **Qt 6 GUI** — drive selector, track list, real-time progress bars, release picker
+- [ ] **Backblaze B2 upload** — `B2Uploader` is built and wired; needs credentials and a config toggle to enable
 - [ ] **Linux support** — libcdio drive layer, `/dev/sr*` enumeration
 - [ ] **macOS support** — IOKit drive layer
 - [ ] **HTOA** — hidden track one audio detection and optional rip as track 00

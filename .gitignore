@@ -16,3 +16,7 @@ Thumbs.db
 # Editor
 .vscode/
 *.swp
+
+# Personal / non-project folders
+linkedin-showcase/
+OutputFolder/
